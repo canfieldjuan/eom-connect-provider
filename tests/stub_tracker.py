@@ -27,10 +27,33 @@ _CONTEXT = "connect-device-access-v1"
 _APPROVE_SEND_PREFIX = "/api/connect/device/funnel/onboarding-drafts/"
 _APPROVE_SEND_SUFFIX = "/approve-send"
 
+_LEADS_PREFIX = "/api/connect/device/funnel/leads/"
+_ESTIMATE_BOOKING_SUFFIX = "/estimate-bookings"
+_FIRST_CLEAN_BOOKING_SUFFIX = "/first-clean-bookings"
+
 
 def _b64u_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode(value + padding)
+
+
+def _booking_receipt(contact_id: str, kind: str, *, idempotent: bool) -> dict[str, object]:
+    if kind == "estimate":
+        return {
+            "success": True,
+            "contactId": contact_id,
+            "leadStage": "estimate_booked",
+            "status": "estimate_booked",
+            "idempotent": idempotent,
+        }
+    return {
+        "success": True,
+        "contactId": contact_id,
+        "leadStage": "won",
+        "status": "first_clean_booked",
+        "idempotent": idempotent,
+        "onboardingDraftId": "99999999-9999-4999-8999-999999999999",
+    }
 
 
 @dataclass
@@ -41,11 +64,14 @@ class _State:
     leads_error: dict[str, object] | None = None
     approve_send_status: int = 201
     approve_send_error: dict[str, object] | None = None
+    booking_status: int = 201
+    booking_error: dict[str, object] | None = None
     challenge: str = "challenge-fixture-token"
     lock: threading.Lock = field(default_factory=threading.Lock)
     proof_requests: list[dict[str, str]] = field(default_factory=list)
     minted_challenges: list[str] = field(default_factory=list)
     approve_send_requests: list[dict[str, object]] = field(default_factory=list)
+    booking_requests: list[dict[str, object]] = field(default_factory=list)
 
 
 class _Server(ThreadingHTTPServer):
@@ -173,7 +199,48 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        booking = self._match_booking(path)
+        if booking is not None:
+            contact_id, kind = booking
+            if self._verify_proof("POST", path, query, body) is None:
+                return
+            try:
+                parsed = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                self._json(400, {"detail": "booking body invalid"})
+                return
+            with state.lock:
+                state.booking_requests.append(
+                    {
+                        "contactId": contact_id,
+                        "kind": kind,
+                        "challengeId": parsed.get("challengeId"),
+                        "confirmationId": parsed.get("confirmationId"),
+                        "scheduledStart": parsed.get("scheduledStart"),
+                        "scheduledEnd": parsed.get("scheduledEnd"),
+                        "idempotencyKey": parsed.get("idempotencyKey"),
+                    }
+                )
+                status = state.booking_status
+                error = state.booking_error
+            if status not in (200, 201):
+                self._json(status, error or {"detail": "forced error"})
+                return
+            self._json(status, _booking_receipt(contact_id, kind, idempotent=status == 200))
+            return
         self._json(404, {"detail": "not found"})
+
+    @staticmethod
+    def _match_booking(path: str) -> tuple[str, str] | None:
+        if not path.startswith(_LEADS_PREFIX):
+            return None
+        for suffix, kind in (
+            (_ESTIMATE_BOOKING_SUFFIX, "estimate"),
+            (_FIRST_CLEAN_BOOKING_SUFFIX, "first_clean"),
+        ):
+            if path.endswith(suffix):
+                return path[len(_LEADS_PREFIX) : -len(suffix)], kind
+        return None
 
     def do_GET(self) -> None:
         state = self.server.state
@@ -228,6 +295,11 @@ class StubTracker:
         with self.state.lock:
             self.state.approve_send_status = status
             self.state.approve_send_error = error
+
+    def set_booking_error(self, status: int, error: dict[str, object] | None = None) -> None:
+        with self.state.lock:
+            self.state.booking_status = status
+            self.state.booking_error = error
 
     def stop(self) -> None:
         self.server.shutdown()

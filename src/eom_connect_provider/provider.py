@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from . import capabilities
+from . import capabilities, tracker_client
 from .capabilities import CapabilitySpec
 from .tracker_client import TrackerAuthError, TrackerError
 
@@ -340,11 +340,22 @@ class _Handler(BaseHTTPRequestHandler):
         The challenge is the shared money seam; the per-capability part is which
         artifact fields to read and which signed tracker call to make.
         """
-        approval = _parse_money_artifact(spec.capability_id, artifact)
+        parsed = _parse_money_artifact(spec.capability_id, artifact)
         challenge_id = self._mint_challenge()
         if spec.capability_id == capabilities.APPROVE_SEND_CAPABILITY_ID:
             return self.server.tracker.approve_send(
-                approval["draftId"], challenge_id, approval["confirmationId"]
+                parsed["draftId"], challenge_id, parsed["confirmationId"]
+            )
+        booking_path = _BOOKING_PATHS.get(spec.capability_id)
+        if booking_path is not None:
+            return self.server.tracker.submit_booking(
+                booking_path,
+                parsed["contactId"],
+                challenge_id,
+                parsed["confirmationId"],
+                parsed["scheduledStart"],
+                parsed["scheduledEnd"],
+                parsed["idempotencyKey"],
             )
         raise TrackerError(  # pragma: no cover - the registry only holds wired ids
             "no money handler for capability", retryable=False
@@ -435,9 +446,17 @@ def _parse_review_queue_parameters(parameters: object) -> tuple[int, str | None]
     return limit, cursor
 
 
+_BOOKING_PATHS = {
+    capabilities.ESTIMATE_BOOKING_CAPABILITY_ID: tracker_client.ESTIMATE_BOOKING_PATH,
+    capabilities.FIRST_CLEAN_BOOKING_CAPABILITY_ID: tracker_client.FIRST_CLEAN_BOOKING_PATH,
+}
+
+
 def _parse_money_artifact(capability_id: str, artifact: bytes) -> dict[str, str]:
     if capability_id == capabilities.APPROVE_SEND_CAPABILITY_ID:
         return _parse_approve_send_artifact(artifact)
+    if capability_id in _BOOKING_PATHS:
+        return _parse_booking_artifact(artifact)
     raise ValueError("Unsupported money capability.")  # pragma: no cover - registry-gated
 
 
@@ -462,6 +481,47 @@ def _parse_approve_send_artifact(artifact: bytes) -> dict[str, str]:
     if not isinstance(confirmation_id, str) or not 1 <= len(confirmation_id) <= 64:
         raise ValueError("Approval confirmationId must be a 1..64 character string.")
     return {"draftId": draft_id, "confirmationId": confirmation_id}
+
+
+def _parse_booking_artifact(artifact: bytes) -> dict[str, str]:
+    """Parse a booking input artifact
+    ``{contactId, scheduledStart, scheduledEnd, idempotencyKey, confirmationId}``.
+
+    Opaque vendor JSON. ``contactId`` becomes a URL path segment on the tracker (a
+    typed UUID there), so it must be a uuid, which also blocks path injection.
+    ``idempotencyKey`` is a uuid (the tracker's durable idempotency identity). The
+    window strings are range-checked here so a clearly-malformed booking is a 400
+    before any signed call; the tracker still enforces strict RFC 3339. Raises
+    ``ValueError`` on a malformed value so the caller maps it to a 400.
+    """
+    try:
+        value = json.loads(artifact)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("Booking artifact is not valid JSON.") from error
+    expected = {"contactId", "scheduledStart", "scheduledEnd", "idempotencyKey", "confirmationId"}
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ValueError(
+            "Booking artifact must be "
+            "{contactId, scheduledStart, scheduledEnd, idempotencyKey, confirmationId}."
+        )
+    if not _is_uuid(value["contactId"]):
+        raise ValueError("Booking contactId must be a uuid.")
+    if not _is_uuid(value["idempotencyKey"]):
+        raise ValueError("Booking idempotencyKey must be a uuid.")
+    for field in ("scheduledStart", "scheduledEnd"):
+        window = value[field]
+        if not isinstance(window, str) or not 20 <= len(window) <= 64:
+            raise ValueError(f"Booking {field} must be an RFC 3339 date-time string.")
+    confirmation_id = value["confirmationId"]
+    if not isinstance(confirmation_id, str) or not 1 <= len(confirmation_id) <= 64:
+        raise ValueError("Booking confirmationId must be a 1..64 character string.")
+    return {
+        "contactId": value["contactId"],
+        "scheduledStart": value["scheduledStart"],
+        "scheduledEnd": value["scheduledEnd"],
+        "idempotencyKey": value["idempotencyKey"],
+        "confirmationId": confirmation_id,
+    }
 
 
 def _private_directory(path: Path) -> None:
