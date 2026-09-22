@@ -1,11 +1,19 @@
 """The local EOM Connect provider: a loopback Connect v2 process on the buyer PC.
 
 The Automate host discovers this provider over loopback and invokes a capability
-with a caller-minted stable ``job_id`` (ADR-0005, same-PC placement). For the
-funnel review-queue read the provider signs a per-request Ed25519 device proof and
-calls the tracker's device endpoint, which holds the Atlas token and relays. The
-provider never holds an Atlas secret and never re-renders from mutable state: a
-retry replays the frozen job identity.
+with a caller-minted stable ``job_id`` (ADR-0005, same-PC placement). Each capability
+maps to a tracker device endpoint reached with a per-request Ed25519 device proof; the
+tracker holds the Atlas token and relays on the bound operator's behalf. The provider
+never holds an Atlas secret and never re-renders from mutable state: a retry replays
+the frozen job identity.
+
+Dispatch is registry-driven (``capabilities.REGISTRY``): the same registry backs the
+served manifest and the accepted job envelope, so the advertised capability and what
+``_validate`` enforces cannot drift. A read (empty artifact, limit/cursor in job
+parameters) relays a device-signed GET. A money path (a small vendor JSON artifact,
+no parameters, ``confirmation_required``) mints a single-use device challenge, then
+makes the device-signed money POST the tracker gates on that challenge plus the
+operator's confirmation carried inside the artifact.
 
 Protocol (matching the host's Connect v2 client and the reference provider):
 - registration file under ``runtime_dir/local-connect/v2/providers/{id}.json``;
@@ -14,9 +22,10 @@ Protocol (matching the host's Connect v2 client and the reference provider):
   status, idempotent by ``job_id`` (409 if the id is reused for other input);
 - ``GET /v2/jobs/{job_id}`` -> a stored completed status, else 404.
 
-Read jobs are synchronous: the POST returns the terminal status. A completed read
-is cached by ``job_id``; a *retryable* failure is not cached, so a re-POST
-re-attempts against the tracker rather than replaying a stale error.
+Jobs are synchronous: the POST returns the terminal status. A completed job is cached
+by ``job_id``; a *retryable* failure is not cached, so a re-POST re-attempts against
+the tracker rather than replaying a stale error. The tracker's own idempotency (the
+draft/booking state machine) makes a re-attempt of a money path safe.
 """
 
 from __future__ import annotations
@@ -27,7 +36,6 @@ import json
 import os
 import secrets
 import threading
-from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,31 +43,62 @@ from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from . import capabilities
+from .capabilities import CapabilitySpec
 from .tracker_client import TrackerAuthError, TrackerError
 
-# A callable that performs the read: (limit, cursor) -> the tracker's queue dict.
-# Injected so the server is testable without a live tracker; production wires it
-# to a TrackerClient.
-LeadFetcher = Callable[[int, str | None], dict[str, object]]
+
+class TrackerGateway(Protocol):
+    """The tracker device-endpoint calls the provider needs, injected for testability.
+
+    A real ``TrackerClient`` satisfies this structurally; tests pass a client pointed
+    at a proof-verifying stub. Keeping the provider on this interface (not the concrete
+    client) means the server has no live-tracker dependency of its own.
+    """
+
+    def get_funnel_leads(
+        self, *, limit: int, cursor: str | None
+    ) -> dict[str, object]: ...
+
+    def mint_operation_challenge(self) -> dict[str, object]: ...
+
+    def approve_send(
+        self, draft_id: str, challenge_id: str, confirmation_id: str
+    ) -> dict[str, object]: ...
+
 
 # Cap the whole multipart body: the largest declared input artifact plus generous
 # slack for the request part and MIME framing.
-_MAX_REQUEST_BYTES = capabilities.READ_MAX_INPUT_BYTES + 256 * 1024
+_MAX_REQUEST_BYTES = (
+    max(spec.max_input_bytes for spec in capabilities.REGISTRY.values()) + 256 * 1024
+)
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _uuid4(value: str) -> bool:
+def _uuid4(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
     try:
         parsed = UUID(value)
     except (ValueError, AttributeError, TypeError):
         return False
     return parsed.version == 4 and str(parsed) == value
+
+
+def _is_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
 
 
 @dataclass
@@ -72,11 +111,11 @@ class _Stored:
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, fetch_leads: LeadFetcher) -> None:
+    def __init__(self, tracker: TrackerGateway) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
         self.instance_id = str(uuid4())
         self.token = secrets.token_urlsafe(32)
-        self.fetch_leads = fetch_leads
+        self.tracker = tracker
         self.jobs: dict[str, _Stored] = {}
         self.lock = threading.Lock()
 
@@ -141,7 +180,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             request, artifact = self._request_parts()
-            job_id, signature = self._validate(request, artifact)
+            spec, job_id, signature = self._validate(request, artifact)
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
             self._error(400, "INVALID_REQUEST", str(error))
             return
@@ -157,7 +196,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, stored.status)
                 return
 
-        status = self._run_read(request, artifact)
+        status = self._run(spec, request, artifact)
 
         # Cache only terminal successes: a retryable failure must let a re-POST
         # re-attempt rather than replay a stale error.
@@ -198,7 +237,9 @@ class _Handler(BaseHTTPRequestHandler):
             raise ValueError("Job request must be an object.")
         return request, parts["artifact"]
 
-    def _validate(self, request: dict[str, object], artifact: bytes) -> tuple[str, str]:
+    def _validate(
+        self, request: dict[str, object], artifact: bytes
+    ) -> tuple[CapabilitySpec, str, str]:
         if set(request) != {"protocol_version", "job_id", "capability", "inputs", "parameters"}:
             raise ValueError("Job request shape is invalid.")
         job_id = request["job_id"]
@@ -206,58 +247,121 @@ class _Handler(BaseHTTPRequestHandler):
         inputs = request["inputs"]
         if (
             request["protocol_version"] != 2
-            or not isinstance(job_id, str)
             or not _uuid4(job_id)
             or not isinstance(capability, dict)
-            or capability.get("id") != capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID
-            or capability.get("version") != "1.0"
             or not isinstance(inputs, list)
             or len(inputs) != 1
             or not isinstance(inputs[0], dict)
         ):
             raise ValueError("Job selection is invalid.")
-        # limit/cursor are job parameters (canonical read convention); validate them
-        # here so a bad parameter is a 400, not a failed job.
-        _parse_review_queue_parameters(request["parameters"])
+        # The registry is the single source of truth for what is served and accepted.
+        spec = capabilities.REGISTRY.get(capability.get("id"))  # type: ignore[arg-type]
+        if spec is None or capability.get("version") != spec.version:
+            raise ValueError("Job selection is invalid.")
         artifact_meta = inputs[0]
-        # The read carries no body: the query lives in parameters, so the single
-        # input artifact must be an empty application/json artifact.
         if (
             set(artifact_meta)
             != {"artifact_id", "media_type", "byte_size", "sha256", "display_name", "source_app_id"}
-            or artifact_meta.get("media_type") != "application/json"
+            or artifact_meta.get("media_type") != spec.input_media_type
             or artifact_meta.get("byte_size") != len(artifact)
             or artifact_meta.get("sha256") != hashlib.sha256(artifact).hexdigest()
-            or len(artifact) != 0
+            or len(artifact) > spec.max_input_bytes
         ):
             raise ValueError("Input artifact integrity is invalid.")
+        self._validate_envelope(spec, request, artifact)
         signature = hashlib.sha256(
             json.dumps(request, separators=(",", ":"), sort_keys=True).encode() + b"\0" + artifact
         ).hexdigest()
-        return job_id, signature
+        return spec, str(job_id), signature
 
-    def _run_read(self, request: dict[str, object], artifact: bytes) -> dict[str, object]:
+    def _validate_envelope(
+        self, spec: CapabilitySpec, request: dict[str, object], artifact: bytes
+    ) -> None:
+        """Per-kind envelope rules, so a malformed job is a 400 before any tracker call."""
+        if spec.kind == capabilities.KIND_READ:
+            # limit/cursor are job parameters (canonical read convention); the single
+            # input artifact carries no body.
+            _parse_review_queue_parameters(request["parameters"])
+            if len(artifact) != 0:
+                raise ValueError("A read carries an empty input artifact.")
+        elif spec.kind == capabilities.KIND_MONEY:
+            # Money paths declare no parameters and carry a non-empty vendor JSON artifact.
+            if request["parameters"] != {}:
+                raise ValueError("This capability accepts no parameters.")
+            if len(artifact) == 0:
+                raise ValueError("A money path requires a non-empty input artifact.")
+            _parse_money_artifact(spec.capability_id, artifact)
+        else:  # pragma: no cover - the registry only holds known kinds
+            raise ValueError("Unknown capability kind.")
+
+    def _run(
+        self, spec: CapabilitySpec, request: dict[str, object], artifact: bytes
+    ) -> dict[str, object]:
+        if spec.kind == capabilities.KIND_READ:
+            return self._run_read(spec, request, artifact)
+        return self._run_money(spec, request, artifact)
+
+    def _run_read(
+        self, spec: CapabilitySpec, request: dict[str, object], artifact: bytes
+    ) -> dict[str, object]:
         try:
             limit, cursor = _parse_review_queue_parameters(request["parameters"])
-            queue = self.server.fetch_leads(limit, cursor)
+            queue = self.server.tracker.get_funnel_leads(limit=limit, cursor=cursor)
             output = json.dumps(queue, separators=(",", ":"), sort_keys=True).encode()
-            return self._status(request, artifact, result_output=output)
+            return self._status(spec, request, artifact, result_output=output)
         except ValueError as error:
             return self._status(
-                request, artifact, error=("INVALID_REQUEST", str(error), False)
+                spec, request, artifact, error=("INVALID_REQUEST", str(error), False)
             )
         except TrackerAuthError as error:
             return self._status(
-                request, artifact, error=("DEVICE_UNAUTHORIZED", str(error), False)
+                spec, request, artifact, error=("DEVICE_UNAUTHORIZED", str(error), False)
             )
         except TrackerError as error:
-            code = "TRACKER_UNAVAILABLE" if error.retryable else "TRACKER_ERROR"
+            return self._status(spec, request, artifact, error=_map_tracker_error(error))
+
+    def _run_money(
+        self, spec: CapabilitySpec, request: dict[str, object], artifact: bytes
+    ) -> dict[str, object]:
+        try:
+            receipt = self._dispatch_money(spec, artifact)
+            output = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode()
+            return self._status(spec, request, artifact, result_output=output)
+        except TrackerAuthError as error:
             return self._status(
-                request, artifact, error=(code, str(error), error.retryable)
+                spec, request, artifact, error=("DEVICE_UNAUTHORIZED", str(error), False)
             )
+        except TrackerError as error:
+            return self._status(spec, request, artifact, error=_map_tracker_error(error))
+
+    def _dispatch_money(self, spec: CapabilitySpec, artifact: bytes) -> dict[str, object]:
+        """Run one money path: mint the single-use challenge, then the money POST.
+
+        The challenge is the shared money seam; the per-capability part is which
+        artifact fields to read and which signed tracker call to make.
+        """
+        approval = _parse_money_artifact(spec.capability_id, artifact)
+        challenge_id = self._mint_challenge()
+        if spec.capability_id == capabilities.APPROVE_SEND_CAPABILITY_ID:
+            return self.server.tracker.approve_send(
+                approval["draftId"], challenge_id, approval["confirmationId"]
+            )
+        raise TrackerError(  # pragma: no cover - the registry only holds wired ids
+            "no money handler for capability", retryable=False
+        )
+
+    def _mint_challenge(self) -> str:
+        challenge = self.server.tracker.mint_operation_challenge()
+        challenge_id = challenge.get("challengeId")
+        if not isinstance(challenge_id, str) or not challenge_id:
+            raise TrackerError(
+                "tracker returned an invalid operation challenge", retryable=False
+            )
+        return challenge_id
 
     def _status(
         self,
+        spec: CapabilitySpec,
         request: dict[str, object],
         artifact: bytes,
         *,
@@ -269,10 +373,7 @@ class _Handler(BaseHTTPRequestHandler):
         status: dict[str, object] = {
             "protocol_version": 2,
             "job_id": request["job_id"],
-            "capability": {
-                "id": capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID,
-                "version": "1.0",
-            },
+            "capability": {"id": spec.capability_id, "version": spec.version},
             "provider": {"app_id": capabilities.APP_ID, "instance_id": self.server.instance_id},
             "status": "completed" if error is None else "failed",
             "created_at": timestamp,
@@ -289,8 +390,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "outputs": [
                     {
                         "artifact_id": str(uuid4()),
-                        "media_type": capabilities.REVIEW_QUEUE_MEDIA_TYPE,
-                        "display_name": "funnel-review-queue.json",
+                        "media_type": spec.produces_media_type,
+                        "display_name": spec.output_display_name,
                         "byte_size": len(result_output),
                         "sha256": hashlib.sha256(result_output).hexdigest(),
                         "payload_base64": base64.b64encode(result_output).decode("ascii"),
@@ -301,6 +402,19 @@ class _Handler(BaseHTTPRequestHandler):
             code, message, retryable = error  # type: ignore[misc]
             status["error"] = {"code": code, "message": message, "retryable": retryable}
         return status
+
+
+def _map_tracker_error(error: TrackerError) -> tuple[str, str, bool]:
+    """Map a tracker failure to a Connect error (code, message, retryable).
+
+    501 is the tracker's typed "Atlas does not implement this yet" (healthy upstream,
+    not a transient outage), so it is non-retryable and distinct from a generic 5xx.
+    """
+    if error.status == 501:
+        return "CAPABILITY_UNAVAILABLE", str(error), False
+    if error.retryable:
+        return "TRACKER_UNAVAILABLE", str(error), True
+    return "TRACKER_ERROR", str(error), False
 
 
 def _parse_review_queue_parameters(parameters: object) -> tuple[int, str | None]:
@@ -319,6 +433,35 @@ def _parse_review_queue_parameters(parameters: object) -> tuple[int, str | None]
     if cursor is not None and (not isinstance(cursor, str) or not cursor):
         raise ValueError("Parameter cursor must be a non-empty string when present.")
     return limit, cursor
+
+
+def _parse_money_artifact(capability_id: str, artifact: bytes) -> dict[str, str]:
+    if capability_id == capabilities.APPROVE_SEND_CAPABILITY_ID:
+        return _parse_approve_send_artifact(artifact)
+    raise ValueError("Unsupported money capability.")  # pragma: no cover - registry-gated
+
+
+def _parse_approve_send_artifact(artifact: bytes) -> dict[str, str]:
+    """Parse the approve-send input artifact ``{draftId, confirmationId}``.
+
+    Opaque vendor JSON, not a Connect envelope. ``draftId`` becomes a URL path segment
+    on the tracker (a typed UUID there), so it must be a uuid, which also blocks path
+    injection. ``confirmationId`` is the operator's single-use token, carried opaque.
+    Raises ``ValueError`` on a malformed value so the caller maps it to a 400.
+    """
+    try:
+        value = json.loads(artifact)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("Approval artifact is not valid JSON.") from error
+    if not isinstance(value, dict) or set(value) != {"draftId", "confirmationId"}:
+        raise ValueError("Approval artifact must be {draftId, confirmationId}.")
+    draft_id = value["draftId"]
+    confirmation_id = value["confirmationId"]
+    if not _is_uuid(draft_id):
+        raise ValueError("Approval draftId must be a uuid.")
+    if not isinstance(confirmation_id, str) or not 1 <= len(confirmation_id) <= 64:
+        raise ValueError("Approval confirmationId must be a 1..64 character string.")
+    return {"draftId": draft_id, "confirmationId": confirmation_id}
 
 
 def _private_directory(path: Path) -> None:
@@ -349,11 +492,11 @@ class EomFunnelProvider:
     registration_path: Path
 
     @classmethod
-    def start(cls, runtime_dir: Path, fetch_leads: LeadFetcher) -> EomFunnelProvider:
+    def start(cls, runtime_dir: Path, tracker: TrackerGateway) -> EomFunnelProvider:
         providers = runtime_dir / "local-connect" / "v2" / "providers"
         for directory in (runtime_dir, runtime_dir / "local-connect", providers.parent, providers):
             _private_directory(directory)
-        server = _Server(fetch_leads)
+        server = _Server(tracker)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         registration_path = providers / f"{server.instance_id}.json"

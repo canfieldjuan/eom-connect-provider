@@ -37,10 +37,7 @@ def wired(tmp_path):
     tracker.set_queue(dict(_QUEUE))
     credential = store.DeviceCredential(device_id=device_id, private_key=private_key)
     client = TrackerClient(tracker.base_url, credential)
-    provider = EomFunnelProvider.start(
-        tmp_path / "runtime",
-        lambda limit, cursor: client.get_funnel_leads(limit=limit, cursor=cursor),
-    )
+    provider = EomFunnelProvider.start(tmp_path / "runtime", client)
     try:
         yield tracker, provider
     finally:
@@ -138,7 +135,8 @@ def test_manifest_is_discoverable(wired):
     assert code == 200
     assert manifest["app"]["id"] == "eom-funnel-provider"
     ids = {c["id"] for c in manifest["capabilities"]}
-    assert ids == {capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID}
+    assert ids == set(capabilities.REGISTRY)
+    assert capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID in ids
     # The registration file exists and is bearer-protected.
     reg = json.loads(provider.registration_path.read_text())
     assert reg["app_id"] == "eom-funnel-provider"

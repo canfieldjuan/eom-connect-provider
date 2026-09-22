@@ -46,14 +46,16 @@ def _canonical_capability(manifest_path: Path, capability_id: str) -> dict:
     raise AssertionError(f"{capability_id} not in canonical manifest {manifest_path}")
 
 
-def test_review_queue_capability_matches_canonical_manifest():
+@pytest.mark.parametrize("capability_id", sorted(capabilities.REGISTRY))
+def test_served_capability_matches_canonical_manifest(capability_id):
+    """Every capability the provider serves is byte-identical to its canonical
+    connect-contracts manifest object. Covers new capabilities automatically as they
+    are added to the registry, so the served manifest cannot drift from the contract."""
     manifest_path = _canonical_manifest_path()
     if manifest_path is None:
         pytest.skip("connect-contracts checkout not found; set CONNECT_CONTRACTS_DIR")
-    canonical = _canonical_capability(
-        manifest_path, capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID
-    )
-    served = capabilities.review_queue_capability()
+    canonical = _canonical_capability(manifest_path, capability_id)
+    served = capabilities.REGISTRY[capability_id].definition
     # Round-trip the served object through JSON so bool/list types compare exactly
     # as the wire form the provider serves.
     served_wire = json.loads(json.dumps(served))

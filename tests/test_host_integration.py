@@ -46,10 +46,7 @@ def test_host_discovers_and_invokes_review_queue(tmp_path):
 
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir(mode=0o700)
-    provider = EomFunnelProvider.start(
-        runtime_dir,
-        lambda limit, cursor: client.get_funnel_leads(limit=limit, cursor=cursor),
-    )
+    provider = EomFunnelProvider.start(runtime_dir, client)
     try:
         catalog = connect.discover_capabilities(runtime_dir)
         items = {
@@ -57,7 +54,7 @@ def test_host_discovers_and_invokes_review_queue(tmp_path):
             for item in catalog.items
             if item.app_id == capabilities.APP_ID
         }
-        assert set(items) == {capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID}
+        assert set(items) == set(capabilities.REGISTRY)
 
         capability = items[capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID]
         # Canonical read: empty artifact, limit/cursor in job parameters.
@@ -84,3 +81,57 @@ def test_host_discovers_and_invokes_review_queue(tmp_path):
         item.app_id != capabilities.APP_ID
         for item in connect.discover_capabilities(runtime_dir).items
     )
+
+
+_DRAFT_ID = "11111111-1111-4111-8111-111111111111"
+_CONFIRMATION_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def test_host_invokes_approve_send_only_with_confirmation(tmp_path):
+    tracker = StubTracker.start()
+    private_key = Ed25519PrivateKey.generate()
+    device_id = str(uuid4())
+    tracker.register_public_key(
+        device_id, private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+    client = TrackerClient(tracker.base_url, store.DeviceCredential(device_id, private_key))
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir(mode=0o700)
+    provider = EomFunnelProvider.start(runtime_dir, client)
+    try:
+        catalog = connect.discover_capabilities(runtime_dir)
+        items = {
+            item.capability_id: item
+            for item in catalog.items
+            if item.app_id == capabilities.APP_ID
+        }
+        capability = items[capabilities.APPROVE_SEND_CAPABILITY_ID]
+        assert capability.confirmation_required is True
+
+        approval = json.dumps(
+            {"draftId": _DRAFT_ID, "confirmationId": _CONFIRMATION_ID}
+        ).encode()
+        media_type = capabilities.APPROVE_SEND_INPUT_MEDIA_TYPE
+
+        # The host refuses to prepare a confirmation-required job without confirmation.
+        with pytest.raises(connect.ConnectError):
+            connect.prepare_capability_job(capability, approval, media_type, "approval.json")
+
+        job = connect.prepare_capability_job(
+            capability, approval, media_type, "approval.json", confirmed=True
+        )
+        completed = connect.ConnectV2Client(capability).submit(job, approval)
+        assert completed.status == "completed"
+        assert completed.result is not None
+        output = completed.result.outputs[0]
+        assert output.media_type == capabilities.APPROVE_SEND_RECEIPT_MEDIA_TYPE
+        receipt = json.loads(output.payload)
+        assert receipt["draftId"] == _DRAFT_ID
+        assert receipt["status"] == "sent"
+        # The tracker received exactly one minted challenge, carried into the send.
+        assert len(tracker.state.minted_challenges) == 1
+        assert tracker.state.approve_send_requests[-1]["confirmationId"] == _CONFIRMATION_ID
+    finally:
+        provider.stop()
+        tracker.stop()
