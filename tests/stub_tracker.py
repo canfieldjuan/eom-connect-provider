@@ -30,6 +30,7 @@ _APPROVE_SEND_SUFFIX = "/approve-send"
 _LEADS_PREFIX = "/api/connect/device/funnel/leads/"
 _ESTIMATE_BOOKING_SUFFIX = "/estimate-bookings"
 _FIRST_CLEAN_BOOKING_SUFFIX = "/first-clean-bookings"
+_CUSTOMER_HANDOFF_SUFFIX = "/customer-handoffs"
 
 
 def _b64u_decode(value: str) -> bytes:
@@ -56,6 +57,20 @@ def _booking_receipt(contact_id: str, kind: str, *, idempotent: bool) -> dict[st
     }
 
 
+def _handoff_receipt(contact_id: str, *, idempotent: bool) -> dict[str, object]:
+    return {
+        "success": True,
+        "idempotent": idempotent,
+        "handoff": {
+            "atlasContactId": contact_id,
+            "customerId": 4242,
+            "siteId": 7,
+            "state": "finalized",
+            "atlasHandoffId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+    }
+
+
 @dataclass
 class _State:
     public_keys: dict[str, bytes] = field(default_factory=dict)
@@ -66,12 +81,15 @@ class _State:
     approve_send_error: dict[str, object] | None = None
     booking_status: int = 201
     booking_error: dict[str, object] | None = None
+    handoff_status: int = 201
+    handoff_error: dict[str, object] | None = None
     challenge: str = "challenge-fixture-token"
     lock: threading.Lock = field(default_factory=threading.Lock)
     proof_requests: list[dict[str, str]] = field(default_factory=list)
     minted_challenges: list[str] = field(default_factory=list)
     approve_send_requests: list[dict[str, object]] = field(default_factory=list)
     booking_requests: list[dict[str, object]] = field(default_factory=list)
+    handoff_requests: list[dict[str, object]] = field(default_factory=list)
 
 
 class _Server(ThreadingHTTPServer):
@@ -228,6 +246,34 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._json(status, _booking_receipt(contact_id, kind, idempotent=status == 200))
             return
+        if path.startswith(_LEADS_PREFIX) and path.endswith(_CUSTOMER_HANDOFF_SUFFIX):
+            contact_id = path[len(_LEADS_PREFIX) : -len(_CUSTOMER_HANDOFF_SUFFIX)]
+            if self._verify_proof("POST", path, query, body) is None:
+                return
+            try:
+                parsed = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                self._json(400, {"detail": "handoff body invalid"})
+                return
+            with state.lock:
+                state.handoff_requests.append(
+                    {
+                        "contactId": contact_id,
+                        "challengeId": parsed.get("challengeId"),
+                        "confirmationId": parsed.get("confirmationId"),
+                        "atlasContactId": parsed.get("atlasContactId"),
+                        "idempotencyKey": parsed.get("idempotencyKey"),
+                    }
+                )
+                status = state.handoff_status
+                error = state.handoff_error
+            if status not in (200, 201):
+                # Includes forced 202 (Atlas pending): the provider maps 202 to a
+                # retryable pending outcome, so the body is not consumed there.
+                self._json(status, error or {"detail": "forced error"})
+                return
+            self._json(status, _handoff_receipt(contact_id, idempotent=status == 200))
+            return
         self._json(404, {"detail": "not found"})
 
     @staticmethod
@@ -300,6 +346,11 @@ class StubTracker:
         with self.state.lock:
             self.state.booking_status = status
             self.state.booking_error = error
+
+    def set_handoff_status(self, status: int, error: dict[str, object] | None = None) -> None:
+        with self.state.lock:
+            self.state.handoff_status = status
+            self.state.handoff_error = error
 
     def stop(self) -> None:
         self.server.shutdown()
