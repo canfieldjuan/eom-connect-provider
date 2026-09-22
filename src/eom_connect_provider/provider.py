@@ -357,6 +357,10 @@ class _Handler(BaseHTTPRequestHandler):
                 parsed["scheduledEnd"],
                 parsed["idempotencyKey"],
             )
+        if spec.capability_id == capabilities.CUSTOMER_HANDOFF_CAPABILITY_ID:
+            return self.server.tracker.submit_customer_handoff(
+                parsed["contactId"], challenge_id, parsed["confirmationId"], parsed["handoff"]
+            )
         raise TrackerError(  # pragma: no cover - the registry only holds wired ids
             "no money handler for capability", retryable=False
         )
@@ -423,6 +427,10 @@ def _map_tracker_error(error: TrackerError) -> tuple[str, str, bool]:
     """
     if error.status == 501:
         return "CAPABILITY_UNAVAILABLE", str(error), False
+    if error.status == 202:
+        # Accepted but not finalized: the tracker holds a durable reservation. A
+        # re-POST replays it (no double effect), so this is retryable and uncached.
+        return "OPERATION_PENDING", str(error), True
     if error.retryable:
         return "TRACKER_UNAVAILABLE", str(error), True
     return "TRACKER_ERROR", str(error), False
@@ -452,11 +460,13 @@ _BOOKING_PATHS = {
 }
 
 
-def _parse_money_artifact(capability_id: str, artifact: bytes) -> dict[str, str]:
+def _parse_money_artifact(capability_id: str, artifact: bytes) -> dict[str, object]:
     if capability_id == capabilities.APPROVE_SEND_CAPABILITY_ID:
         return _parse_approve_send_artifact(artifact)
     if capability_id in _BOOKING_PATHS:
         return _parse_booking_artifact(artifact)
+    if capability_id == capabilities.CUSTOMER_HANDOFF_CAPABILITY_ID:
+        return _parse_customer_handoff_artifact(artifact)
     raise ValueError("Unsupported money capability.")  # pragma: no cover - registry-gated
 
 
@@ -521,6 +531,39 @@ def _parse_booking_artifact(artifact: bytes) -> dict[str, str]:
         "scheduledEnd": value["scheduledEnd"],
         "idempotencyKey": value["idempotencyKey"],
         "confirmationId": confirmation_id,
+    }
+
+
+def _parse_customer_handoff_artifact(artifact: bytes) -> dict[str, object]:
+    """Parse a customer-handoff input artifact ``{confirmationId, handoff}``.
+
+    ``handoff`` is the opaque office customer/site payload; the provider does not
+    validate its schema (the tracker does), it only pulls ``atlasContactId`` for the
+    URL path (a uuid there, so this also blocks path injection) and forbids the
+    device-only fields the provider itself supplies. ``confirmationId`` is the
+    operator's single-use token, carried opaque. Raises ``ValueError`` on a malformed
+    value so the caller maps it to a 400.
+    """
+    try:
+        value = json.loads(artifact)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("Handoff artifact is not valid JSON.") from error
+    if not isinstance(value, dict) or set(value) != {"confirmationId", "handoff"}:
+        raise ValueError("Handoff artifact must be {confirmationId, handoff}.")
+    confirmation_id = value["confirmationId"]
+    if not isinstance(confirmation_id, str) or not 1 <= len(confirmation_id) <= 64:
+        raise ValueError("Handoff confirmationId must be a 1..64 character string.")
+    handoff = value["handoff"]
+    if not isinstance(handoff, dict) or not handoff:
+        raise ValueError("Handoff payload must be a non-empty object.")
+    if {"challengeId", "confirmationId"} & set(handoff):
+        raise ValueError("Handoff payload must not carry challengeId or confirmationId.")
+    if not _is_uuid(handoff.get("atlasContactId")):
+        raise ValueError("Handoff payload atlasContactId must be a uuid.")
+    return {
+        "contactId": handoff["atlasContactId"],
+        "confirmationId": confirmation_id,
+        "handoff": handoff,
     }
 
 

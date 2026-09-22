@@ -25,6 +25,7 @@ OPERATION_CHALLENGE_PATH = "/api/connect/device/operations/challenge"
 APPROVE_SEND_PATH = "/api/connect/device/funnel/onboarding-drafts/{draft_id}/approve-send"
 ESTIMATE_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/estimate-bookings"
 FIRST_CLEAN_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/first-clean-bookings"
+CUSTOMER_HANDOFF_PATH = "/api/connect/device/funnel/leads/{contact_id}/customer-handoffs"
 
 
 class TrackerError(Exception):
@@ -161,6 +162,41 @@ class TrackerClient:
         url = f"{self._root()}{path}"
         return self._request("POST", url, headers=headers, body=body)
 
+    def submit_customer_handoff(
+        self,
+        contact_id: str,
+        challenge_id: str,
+        confirmation_id: str,
+        handoff: dict[str, object],
+    ) -> dict[str, object]:
+        """Finalize one tracker-created Customer/Site against a lead.
+
+        Confirmation-gated money path on the shared money seam. ``handoff`` is the
+        opaque office customer/site payload (the tracker validates it); this adds the
+        provider-minted ``challengeId`` and the operator's ``confirmationId`` and
+        posts to the device handoff route for ``contact_id`` (the payload's
+        ``atlasContactId``, which the tracker requires to match the path). The
+        tracker owns the durable reservation and 202-pending reconciliation; a 202 is
+        surfaced as a retryable pending outcome (see ``_request``) so a re-POST
+        replays the reservation rather than creating a second Customer/Site.
+        """
+        path = CUSTOMER_HANDOFF_PATH.format(contact_id=contact_id)
+        body = json.dumps(
+            {**handoff, "challengeId": challenge_id, "confirmationId": confirmation_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        headers = access_proof_headers(
+            self.credential.private_key,
+            self.credential.device_id,
+            method="POST",
+            path=path,
+            query="",
+            body=body,
+        )
+        url = f"{self._root()}{path}"
+        return self._request("POST", url, headers=headers, body=body)
+
     def _request(
         self,
         method: str,
@@ -176,6 +212,7 @@ class TrackerClient:
             request.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                status = response.status
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as error:
             raw = error.read(_MAX_RESPONSE_BYTES + 1) if error.fp else b""
@@ -191,6 +228,13 @@ class TrackerClient:
             raise TrackerError(
                 f"tracker unreachable: {error}", status=None, retryable=True
             ) from error
+        # 202 Accepted: the tracker reserved the operation but its external
+        # finalization is still pending (e.g. an ambiguous Atlas result). It is not a
+        # completed result, so surface it as retryable; a re-POST replays the
+        # tracker's durable reservation rather than treating pending as done or
+        # creating a second effect.
+        if status == 202:
+            raise TrackerError("tracker operation is pending", status=202, retryable=True)
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise TrackerError("tracker response too large", status=None, retryable=False)
         try:

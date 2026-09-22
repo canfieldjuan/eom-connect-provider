@@ -41,6 +41,12 @@ FIRST_CLEAN_BOOKING_CAPABILITY_ID = "lead.first-clean-booking"
 FIRST_CLEAN_BOOKING_INPUT_MEDIA_TYPE = "application/vnd.eom.first-clean-booking+json"
 FIRST_CLEAN_BOOKING_RECEIPT_MEDIA_TYPE = "application/vnd.eom.first-clean-booking-receipt+json"
 
+# Money: finalize one tracker-created Customer/Site against a lead. Maps to the
+# tracker device money path POST /api/connect/device/funnel/leads/{contact_id}/customer-handoffs.
+CUSTOMER_HANDOFF_CAPABILITY_ID = "lead.customer-handoff"
+CUSTOMER_HANDOFF_INPUT_MEDIA_TYPE = "application/vnd.eom.customer-handoff+json"
+CUSTOMER_HANDOFF_RECEIPT_MEDIA_TYPE = "application/vnd.eom.customer-handoff-receipt+json"
+
 # Reads carry an empty artifact (limit/cursor ride in job parameters, matching the
 # canonical read convention). Money paths carry a small opaque vendor JSON artifact;
 # bookings carry the appointment window, so they get the larger canonical cap.
@@ -161,6 +167,28 @@ def first_clean_booking_capability() -> dict[str, object]:
     }
 
 
+def customer_handoff_capability() -> dict[str, object]:
+    return {
+        "id": CUSTOMER_HANDOFF_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Hand off customer",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Finalize exactly one tracker-created Customer/Site against an EOM "
+                "lead. Creates durable CRM state and requires a fresh operator "
+                "approval."
+            ),
+        },
+        "accepts": [
+            {"media_type": CUSTOMER_HANDOFF_INPUT_MEDIA_TYPE, "max_bytes": BOOKING_MAX_INPUT_BYTES}
+        ],
+        "produces": [CUSTOMER_HANDOFF_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
 @dataclass(frozen=True)
 class CapabilitySpec:
     """A served capability plus the envelope metadata the provider validates against.
@@ -219,6 +247,14 @@ def _specs() -> list[CapabilitySpec]:
             max_input_bytes=BOOKING_MAX_INPUT_BYTES,
             produces_media_type=FIRST_CLEAN_BOOKING_RECEIPT_MEDIA_TYPE,
             output_display_name="first-clean-booking-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=customer_handoff_capability(),
+            kind=KIND_MONEY,
+            input_media_type=CUSTOMER_HANDOFF_INPUT_MEDIA_TYPE,
+            max_input_bytes=BOOKING_MAX_INPUT_BYTES,
+            produces_media_type=CUSTOMER_HANDOFF_RECEIPT_MEDIA_TYPE,
+            output_display_name="customer-handoff-receipt.json",
         ),
     ]
 
