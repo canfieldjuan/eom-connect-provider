@@ -135,3 +135,56 @@ def test_host_invokes_approve_send_only_with_confirmation(tmp_path):
     finally:
         provider.stop()
         tracker.stop()
+
+
+def test_host_invokes_estimate_booking_with_confirmation(tmp_path):
+    tracker = StubTracker.start()
+    private_key = Ed25519PrivateKey.generate()
+    device_id = str(uuid4())
+    tracker.register_public_key(
+        device_id, private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+    client = TrackerClient(tracker.base_url, store.DeviceCredential(device_id, private_key))
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir(mode=0o700)
+    provider = EomFunnelProvider.start(runtime_dir, client)
+    try:
+        catalog = connect.discover_capabilities(runtime_dir)
+        items = {
+            item.capability_id: item
+            for item in catalog.items
+            if item.app_id == capabilities.APP_ID
+        }
+        capability = items[capabilities.ESTIMATE_BOOKING_CAPABILITY_ID]
+        assert capability.confirmation_required is True
+
+        booking = json.dumps(
+            {
+                "contactId": _DRAFT_ID,
+                "scheduledStart": "2026-02-01T09:00:00Z",
+                "scheduledEnd": "2026-02-01T10:00:00Z",
+                "idempotencyKey": _CONFIRMATION_ID,
+                "confirmationId": _CONFIRMATION_ID,
+            }
+        ).encode()
+        media_type = capabilities.ESTIMATE_BOOKING_INPUT_MEDIA_TYPE
+
+        with pytest.raises(connect.ConnectError):
+            connect.prepare_capability_job(capability, booking, media_type, "booking.json")
+
+        job = connect.prepare_capability_job(
+            capability, booking, media_type, "booking.json", confirmed=True
+        )
+        completed = connect.ConnectV2Client(capability).submit(job, booking)
+        assert completed.status == "completed"
+        assert completed.result is not None
+        output = completed.result.outputs[0]
+        assert output.media_type == capabilities.ESTIMATE_BOOKING_RECEIPT_MEDIA_TYPE
+        receipt = json.loads(output.payload)
+        assert receipt["contactId"] == _DRAFT_ID
+        assert receipt["status"] == "estimate_booked"
+        assert len(tracker.state.minted_challenges) == 1
+    finally:
+        provider.stop()
+        tracker.stop()

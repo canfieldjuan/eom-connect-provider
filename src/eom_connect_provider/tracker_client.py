@@ -23,6 +23,8 @@ _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 FUNNEL_LEADS_PATH = "/api/connect/device/funnel/leads"
 OPERATION_CHALLENGE_PATH = "/api/connect/device/operations/challenge"
 APPROVE_SEND_PATH = "/api/connect/device/funnel/onboarding-drafts/{draft_id}/approve-send"
+ESTIMATE_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/estimate-bookings"
+FIRST_CLEAN_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/first-clean-bookings"
 
 
 class TrackerError(Exception):
@@ -104,6 +106,47 @@ class TrackerClient:
         path = APPROVE_SEND_PATH.format(draft_id=draft_id)
         body = json.dumps(
             {"challengeId": challenge_id, "confirmationId": confirmation_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        headers = access_proof_headers(
+            self.credential.private_key,
+            self.credential.device_id,
+            method="POST",
+            path=path,
+            query="",
+            body=body,
+        )
+        url = f"{self._root()}{path}"
+        return self._request("POST", url, headers=headers, body=body)
+
+    def submit_booking(
+        self,
+        booking_path: str,
+        contact_id: str,
+        challenge_id: str,
+        confirmation_id: str,
+        scheduled_start: str,
+        scheduled_end: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        """Book an estimate or first clean for a lead on the bound operator's behalf.
+
+        Confirmation-gated money path shared by both bookings (``booking_path`` picks
+        which). Carries the single-use ``challengeId``, the operator's
+        ``confirmationId``, the appointment window, and the client ``idempotencyKey``
+        that is the durable identity a retry replays against, so Atlas does not
+        double-book. Returns the tracker's booking receipt.
+        """
+        path = booking_path.format(contact_id=contact_id)
+        body = json.dumps(
+            {
+                "challengeId": challenge_id,
+                "confirmationId": confirmation_id,
+                "scheduledStart": scheduled_start,
+                "scheduledEnd": scheduled_end,
+                "idempotencyKey": idempotency_key,
+            },
             separators=(",", ":"),
             sort_keys=True,
         ).encode()

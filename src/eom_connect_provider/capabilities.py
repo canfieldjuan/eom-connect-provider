@@ -32,10 +32,21 @@ APPROVE_SEND_CAPABILITY_ID = "onboarding.draft.approve-send"
 APPROVE_SEND_INPUT_MEDIA_TYPE = "application/vnd.eom.onboarding-draft-approval+json"
 APPROVE_SEND_RECEIPT_MEDIA_TYPE = "application/vnd.eom.onboarding-draft-send-receipt+json"
 
+# Money: book an estimate or a first clean for a lead. Map to the tracker device
+# booking money paths POST /api/connect/device/funnel/leads/{contact_id}/{...}-bookings.
+ESTIMATE_BOOKING_CAPABILITY_ID = "lead.estimate-booking"
+ESTIMATE_BOOKING_INPUT_MEDIA_TYPE = "application/vnd.eom.estimate-booking+json"
+ESTIMATE_BOOKING_RECEIPT_MEDIA_TYPE = "application/vnd.eom.estimate-booking-receipt+json"
+FIRST_CLEAN_BOOKING_CAPABILITY_ID = "lead.first-clean-booking"
+FIRST_CLEAN_BOOKING_INPUT_MEDIA_TYPE = "application/vnd.eom.first-clean-booking+json"
+FIRST_CLEAN_BOOKING_RECEIPT_MEDIA_TYPE = "application/vnd.eom.first-clean-booking-receipt+json"
+
 # Reads carry an empty artifact (limit/cursor ride in job parameters, matching the
-# canonical read convention). Money paths carry a small opaque vendor JSON artifact.
+# canonical read convention). Money paths carry a small opaque vendor JSON artifact;
+# bookings carry the appointment window, so they get the larger canonical cap.
 READ_MAX_INPUT_BYTES = 1024
 MONEY_MAX_INPUT_BYTES = 1024
+BOOKING_MAX_INPUT_BYTES = 8192
 
 # Dispatch kinds.
 KIND_READ = "read"
@@ -102,6 +113,54 @@ def approve_send_capability() -> dict[str, object]:
     }
 
 
+def estimate_booking_capability() -> dict[str, object]:
+    return {
+        "id": ESTIMATE_BOOKING_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Book estimate appointment",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Book an estimate appointment for a lead without converting it to a "
+                "customer. Creates a durable booking and calendar event, and requires "
+                "a fresh operator approval."
+            ),
+        },
+        "accepts": [
+            {"media_type": ESTIMATE_BOOKING_INPUT_MEDIA_TYPE, "max_bytes": BOOKING_MAX_INPUT_BYTES}
+        ],
+        "produces": [ESTIMATE_BOOKING_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
+def first_clean_booking_capability() -> dict[str, object]:
+    return {
+        "id": FIRST_CLEAN_BOOKING_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Book first cleaning",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Book the first cleaning for a lead: the lead becomes won and an "
+                "onboarding email draft is enqueued for office approval. Nothing is "
+                "sent. Creates durable CRM state and a calendar event, and requires a "
+                "fresh operator approval."
+            ),
+        },
+        "accepts": [
+            {
+                "media_type": FIRST_CLEAN_BOOKING_INPUT_MEDIA_TYPE,
+                "max_bytes": BOOKING_MAX_INPUT_BYTES,
+            }
+        ],
+        "produces": [FIRST_CLEAN_BOOKING_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
 @dataclass(frozen=True)
 class CapabilitySpec:
     """A served capability plus the envelope metadata the provider validates against.
@@ -144,6 +203,22 @@ def _specs() -> list[CapabilitySpec]:
             max_input_bytes=MONEY_MAX_INPUT_BYTES,
             produces_media_type=APPROVE_SEND_RECEIPT_MEDIA_TYPE,
             output_display_name="onboarding-draft-send-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=estimate_booking_capability(),
+            kind=KIND_MONEY,
+            input_media_type=ESTIMATE_BOOKING_INPUT_MEDIA_TYPE,
+            max_input_bytes=BOOKING_MAX_INPUT_BYTES,
+            produces_media_type=ESTIMATE_BOOKING_RECEIPT_MEDIA_TYPE,
+            output_display_name="estimate-booking-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=first_clean_booking_capability(),
+            kind=KIND_MONEY,
+            input_media_type=FIRST_CLEAN_BOOKING_INPUT_MEDIA_TYPE,
+            max_input_bytes=BOOKING_MAX_INPUT_BYTES,
+            produces_media_type=FIRST_CLEAN_BOOKING_RECEIPT_MEDIA_TYPE,
+            output_display_name="first-clean-booking-receipt.json",
         ),
     ]
 
