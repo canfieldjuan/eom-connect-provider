@@ -31,6 +31,7 @@ _LEADS_PREFIX = "/api/connect/device/funnel/leads/"
 _ESTIMATE_BOOKING_SUFFIX = "/estimate-bookings"
 _FIRST_CLEAN_BOOKING_SUFFIX = "/first-clean-bookings"
 _CUSTOMER_HANDOFF_SUFFIX = "/customer-handoffs"
+_MARK_WORKING_SUFFIX = "/working"
 
 
 def _b64u_decode(value: str) -> bytes:
@@ -71,6 +72,18 @@ def _handoff_receipt(contact_id: str, *, idempotent: bool) -> dict[str, object]:
     }
 
 
+def _working_receipt(contact_id: str) -> dict[str, object]:
+    return {
+        "success": True,
+        "workingLead": {
+            "contactId": contact_id,
+            "markedAt": "2026-09-17T12:20:00Z",
+            "markedByEmployeeId": 42,
+            "stateToken": "b" * 64,
+        },
+    }
+
+
 @dataclass
 class _State:
     public_keys: dict[str, bytes] = field(default_factory=dict)
@@ -83,6 +96,8 @@ class _State:
     booking_error: dict[str, object] | None = None
     handoff_status: int = 201
     handoff_error: dict[str, object] | None = None
+    working_status: int = 200
+    working_error: dict[str, object] | None = None
     challenge: str = "challenge-fixture-token"
     lock: threading.Lock = field(default_factory=threading.Lock)
     proof_requests: list[dict[str, str]] = field(default_factory=list)
@@ -90,6 +105,7 @@ class _State:
     approve_send_requests: list[dict[str, object]] = field(default_factory=list)
     booking_requests: list[dict[str, object]] = field(default_factory=list)
     handoff_requests: list[dict[str, object]] = field(default_factory=list)
+    working_requests: list[dict[str, object]] = field(default_factory=list)
 
 
 class _Server(ThreadingHTTPServer):
@@ -274,6 +290,31 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._json(status, _handoff_receipt(contact_id, idempotent=status == 200))
             return
+        if path.startswith(_LEADS_PREFIX) and path.endswith(_MARK_WORKING_SUFFIX):
+            contact_id = path[len(_LEADS_PREFIX) : -len(_MARK_WORKING_SUFFIX)]
+            if self._verify_proof("POST", path, query, body) is None:
+                return
+            try:
+                parsed = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                self._json(400, {"detail": "working body invalid"})
+                return
+            with state.lock:
+                state.working_requests.append(
+                    {
+                        "contactId": contact_id,
+                        "challengeId": parsed.get("challengeId"),
+                        "confirmationId": parsed.get("confirmationId"),
+                        "expectedStateToken": parsed.get("expectedStateToken"),
+                    }
+                )
+                status = state.working_status
+                error = state.working_error
+            if status not in (200, 201):
+                self._json(status, error or {"detail": "forced error"})
+                return
+            self._json(status, _working_receipt(contact_id))
+            return
         self._json(404, {"detail": "not found"})
 
     @staticmethod
@@ -351,6 +392,11 @@ class StubTracker:
         with self.state.lock:
             self.state.handoff_status = status
             self.state.handoff_error = error
+
+    def set_working_status(self, status: int, error: dict[str, object] | None = None) -> None:
+        with self.state.lock:
+            self.state.working_status = status
+            self.state.working_error = error
 
     def stop(self) -> None:
         self.server.shutdown()

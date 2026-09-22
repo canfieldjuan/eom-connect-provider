@@ -361,6 +361,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self.server.tracker.submit_customer_handoff(
                 parsed["contactId"], challenge_id, parsed["confirmationId"], parsed["handoff"]
             )
+        if spec.capability_id == capabilities.MARK_WORKING_CAPABILITY_ID:
+            return self.server.tracker.mark_lead_working(
+                parsed["contactId"],
+                challenge_id,
+                parsed["confirmationId"],
+                parsed["expectedStateToken"],
+            )
         raise TrackerError(  # pragma: no cover - the registry only holds wired ids
             "no money handler for capability", retryable=False
         )
@@ -431,6 +438,10 @@ def _map_tracker_error(error: TrackerError) -> tuple[str, str, bool]:
         # Accepted but not finalized: the tracker holds a durable reservation. A
         # re-POST replays it (no double effect), so this is retryable and uncached.
         return "OPERATION_PENDING", str(error), True
+    if error.status == 409:
+        # A definitive state conflict (e.g. a stale optimistic token or an already
+        # reserved lead): the same request cannot succeed on retry.
+        return "STATE_CONFLICT", str(error), False
     if error.retryable:
         return "TRACKER_UNAVAILABLE", str(error), True
     return "TRACKER_ERROR", str(error), False
@@ -467,6 +478,8 @@ def _parse_money_artifact(capability_id: str, artifact: bytes) -> dict[str, obje
         return _parse_booking_artifact(artifact)
     if capability_id == capabilities.CUSTOMER_HANDOFF_CAPABILITY_ID:
         return _parse_customer_handoff_artifact(artifact)
+    if capability_id == capabilities.MARK_WORKING_CAPABILITY_ID:
+        return _parse_mark_working_artifact(artifact)
     raise ValueError("Unsupported money capability.")  # pragma: no cover - registry-gated
 
 
@@ -564,6 +577,43 @@ def _parse_customer_handoff_artifact(artifact: bytes) -> dict[str, object]:
         "contactId": handoff["atlasContactId"],
         "confirmationId": confirmation_id,
         "handoff": handoff,
+    }
+
+
+def _parse_mark_working_artifact(artifact: bytes) -> dict[str, str]:
+    """Parse a mark-working input artifact
+    ``{contactId, expectedStateToken, confirmationId}``.
+
+    ``contactId`` becomes a URL path segment on the tracker (a uuid there, so this
+    also blocks path injection). ``expectedStateToken`` is the opaque optimistic
+    token read from the review queue (the tracker compares it and 409s if stale).
+    ``confirmationId`` is the operator's single-use token, carried opaque. Raises
+    ``ValueError`` on a malformed value so the caller maps it to a 400.
+    """
+    try:
+        value = json.loads(artifact)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("Mark-working artifact is not valid JSON.") from error
+    if not isinstance(value, dict) or set(value) != {
+        "contactId",
+        "expectedStateToken",
+        "confirmationId",
+    }:
+        raise ValueError(
+            "Mark-working artifact must be {contactId, expectedStateToken, confirmationId}."
+        )
+    if not _is_uuid(value["contactId"]):
+        raise ValueError("Mark-working contactId must be a uuid.")
+    token = value["expectedStateToken"]
+    if not isinstance(token, str) or not 1 <= len(token) <= 128:
+        raise ValueError("Mark-working expectedStateToken must be a 1..128 character string.")
+    confirmation_id = value["confirmationId"]
+    if not isinstance(confirmation_id, str) or not 1 <= len(confirmation_id) <= 64:
+        raise ValueError("Mark-working confirmationId must be a 1..64 character string.")
+    return {
+        "contactId": value["contactId"],
+        "expectedStateToken": token,
+        "confirmationId": confirmation_id,
     }
 
 
