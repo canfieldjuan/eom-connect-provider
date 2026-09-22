@@ -60,9 +60,10 @@ def test_host_discovers_and_invokes_review_queue(tmp_path):
         assert set(items) == {capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID}
 
         capability = items[capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID]
-        content = b'{"limit":25}'
+        # Canonical read: empty artifact, limit/cursor in job parameters.
+        content = b""
         job = connect.prepare_capability_job(
-            capability, content, "application/json", "query.json"
+            capability, content, "application/json", "query.json", parameters={"limit": 25}
         )
         completed = connect.ConnectV2Client(capability).submit(job, content)
         assert completed.status == "completed"
