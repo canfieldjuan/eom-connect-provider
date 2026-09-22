@@ -1,0 +1,29 @@
+[project]
+name = "eom-connect-provider"
+version = "0.1.0"
+description = "Local EOM Connect provider: fronts the EOM funnel over a per-PC device key, holding no Atlas token."
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["eom_connect_provider"]
+package-dir = { "" = "src" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
