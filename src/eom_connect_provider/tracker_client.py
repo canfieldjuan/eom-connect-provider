@@ -21,6 +21,8 @@ _DEFAULT_TIMEOUT_S = 30
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 FUNNEL_LEADS_PATH = "/api/connect/device/funnel/leads"
+OPERATION_CHALLENGE_PATH = "/api/connect/device/operations/challenge"
+APPROVE_SEND_PATH = "/api/connect/device/funnel/onboarding-drafts/{draft_id}/approve-send"
 
 
 class TrackerError(Exception):
@@ -69,6 +71,52 @@ class TrackerClient:
         )
         url = f"{self._root()}{FUNNEL_LEADS_PATH}?{query}"
         return self._request("GET", url, headers=headers, body=None)
+
+    def mint_operation_challenge(self) -> dict[str, object]:
+        """Mint a single-use, short-lived anti-replay challenge for a money path.
+
+        The device references the returned ``challengeId`` in the body of the money
+        mutation its next proof signs, so dispatch consumes it exactly once. The
+        request carries no body; the proof still binds the method and path.
+        """
+        headers = access_proof_headers(
+            self.credential.private_key,
+            self.credential.device_id,
+            method="POST",
+            path=OPERATION_CHALLENGE_PATH,
+            query="",
+            body=b"",
+        )
+        url = f"{self._root()}{OPERATION_CHALLENGE_PATH}"
+        return self._request("POST", url, headers=headers, body=b"")
+
+    def approve_send(
+        self, draft_id: str, challenge_id: str, confirmation_id: str
+    ) -> dict[str, object]:
+        """Approve-and-send one onboarding draft on the bound operator's behalf.
+
+        Confirmation-gated money path: carries the single-use ``challengeId`` and the
+        operator's ``confirmationId`` for this exact draft. The draft id is the path
+        parameter and its status machine is the tracker/Atlas idempotency mechanism,
+        so an already-sent draft replays without a second send. Returns the tracker's
+        sent receipt (``success, draftId, status, sentAt, idempotent``).
+        """
+        path = APPROVE_SEND_PATH.format(draft_id=draft_id)
+        body = json.dumps(
+            {"challengeId": challenge_id, "confirmationId": confirmation_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        headers = access_proof_headers(
+            self.credential.private_key,
+            self.credential.device_id,
+            method="POST",
+            path=path,
+            query="",
+            body=body,
+        )
+        url = f"{self._root()}{path}"
+        return self._request("POST", url, headers=headers, body=body)
 
     def _request(
         self,
