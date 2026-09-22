@@ -17,8 +17,9 @@ APP_VERSION = "0.1.0"
 REVIEW_QUEUE_LIST_CAPABILITY_ID = "lead.review-queue.list"
 REVIEW_QUEUE_MEDIA_TYPE = "application/vnd.eom.funnel-review-queue+json"
 
-# The query artifact is a small JSON object: {"limit"?: int, "cursor"?: str}.
-MAX_QUERY_BYTES = 64 * 1024
+# The query artifact is empty; limit/cursor are job parameters, matching the
+# canonical read convention (connect-contracts `onboarding.public-link.list`).
+READ_MAX_INPUT_BYTES = 1024
 
 
 def review_queue_capability() -> dict[str, object]:
@@ -27,14 +28,32 @@ def review_queue_capability() -> dict[str, object]:
         "version": "1.0",
         "action": {
             "label": "List funnel review queue",
+            # Kept byte-identical to the connect-contracts canonical manifest object
+            # (see test_contract_conformance): the fixture is the source of truth.
             "description": (
-                "Poll the EOM funnel review work-queue on the bound operator's "
-                "behalf. Read-only; performs no mutation and needs no confirmation."
+                "Poll the funnel review work-queue on the bound operator's behalf: "
+                "new leads, working leads, and pending handoffs. Read-only "
+                "projection; alters no lead, booking, or handoff state."
             ),
         },
-        "accepts": [{"media_type": "application/json", "max_bytes": MAX_QUERY_BYTES}],
+        "accepts": [{"media_type": "application/json", "max_bytes": READ_MAX_INPUT_BYTES}],
         "produces": [REVIEW_QUEUE_MEDIA_TYPE],
-        "parameters": [],
+        "parameters": [
+            {
+                "name": "limit",
+                "value_type": "integer",
+                "required": False,
+                "label": "Limit",
+                "description": "Maximum number of leads to return in one page.",
+            },
+            {
+                "name": "cursor",
+                "value_type": "string",
+                "required": False,
+                "label": "Cursor",
+                "description": "Opaque pagination cursor returned by a prior page.",
+            },
+        ],
         "effects": {"external": False, "confirmation_required": False},
     }
 

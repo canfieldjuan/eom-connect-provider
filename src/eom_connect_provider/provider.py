@@ -45,7 +45,9 @@ from .tracker_client import TrackerAuthError, TrackerError
 # to a TrackerClient.
 LeadFetcher = Callable[[int, str | None], dict[str, object]]
 
-_MAX_REQUEST_BYTES = capabilities.MAX_QUERY_BYTES + 256 * 1024
+# Cap the whole multipart body: the largest declared input artifact plus generous
+# slack for the request part and MIME framing.
+_MAX_REQUEST_BYTES = capabilities.READ_MAX_INPUT_BYTES + 256 * 1024
 
 
 def _now() -> str:
@@ -214,15 +216,19 @@ class _Handler(BaseHTTPRequestHandler):
             or not isinstance(inputs[0], dict)
         ):
             raise ValueError("Job selection is invalid.")
-        if request["parameters"] != {}:
-            raise ValueError("Capability parameters are invalid.")
+        # limit/cursor are job parameters (canonical read convention); validate them
+        # here so a bad parameter is a 400, not a failed job.
+        _parse_review_queue_parameters(request["parameters"])
         artifact_meta = inputs[0]
+        # The read carries no body: the query lives in parameters, so the single
+        # input artifact must be an empty application/json artifact.
         if (
             set(artifact_meta)
             != {"artifact_id", "media_type", "byte_size", "sha256", "display_name", "source_app_id"}
             or artifact_meta.get("media_type") != "application/json"
             or artifact_meta.get("byte_size") != len(artifact)
             or artifact_meta.get("sha256") != hashlib.sha256(artifact).hexdigest()
+            or len(artifact) != 0
         ):
             raise ValueError("Input artifact integrity is invalid.")
         signature = hashlib.sha256(
@@ -232,7 +238,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _run_read(self, request: dict[str, object], artifact: bytes) -> dict[str, object]:
         try:
-            limit, cursor = _parse_query(artifact)
+            limit, cursor = _parse_review_queue_parameters(request["parameters"])
             queue = self.server.fetch_leads(limit, cursor)
             output = json.dumps(queue, separators=(",", ":"), sort_keys=True).encode()
             return self._status(request, artifact, result_output=output)
@@ -297,19 +303,21 @@ class _Handler(BaseHTTPRequestHandler):
         return status
 
 
-def _parse_query(artifact: bytes) -> tuple[int, str | None]:
-    """Parse the JSON query artifact ``{"limit"?: int, "cursor"?: str}``."""
-    if artifact.strip() == b"":
-        return 100, None
-    parsed = json.loads(artifact)
-    if not isinstance(parsed, dict) or set(parsed) - {"limit", "cursor"}:
-        raise ValueError("Query artifact must be an object with optional limit/cursor.")
-    limit = parsed.get("limit", 100)
+def _parse_review_queue_parameters(parameters: object) -> tuple[int, str | None]:
+    """Parse the review-queue job parameters ``{"limit"?: int, "cursor"?: str}``.
+
+    limit/cursor ride in the Connect job parameters (canonical read convention), not
+    the input artifact, which is empty. Raises ``ValueError`` on a malformed value so
+    the caller maps it to a 400.
+    """
+    if not isinstance(parameters, dict) or set(parameters) - {"limit", "cursor"}:
+        raise ValueError("Parameters must be an object with optional limit/cursor.")
+    limit = parameters.get("limit", 100)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
-        raise ValueError("Query limit must be an integer in [1, 200].")
-    cursor = parsed.get("cursor")
+        raise ValueError("Parameter limit must be an integer in [1, 200].")
+    cursor = parameters.get("cursor")
     if cursor is not None and (not isinstance(cursor, str) or not cursor):
-        raise ValueError("Query cursor must be a non-empty string when present.")
+        raise ValueError("Parameter cursor must be a non-empty string when present.")
     return limit, cursor
 
 

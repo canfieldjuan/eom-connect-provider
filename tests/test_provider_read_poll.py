@@ -67,7 +67,11 @@ def _multipart(request_bytes: bytes, artifact_bytes: bytes) -> tuple[str, bytes]
     return f"multipart/form-data; boundary={boundary}", body
 
 
-def _job_request(job_id: str, artifact: bytes, artifact_id: str) -> bytes:
+# The read carries no body: limit/cursor ride in job parameters, the artifact is empty.
+_EMPTY_ARTIFACT = b""
+
+
+def _job_request(job_id: str, artifact_id: str, parameters: dict) -> bytes:
     request = {
         "protocol_version": 2,
         "job_id": job_id,
@@ -76,28 +80,29 @@ def _job_request(job_id: str, artifact: bytes, artifact_id: str) -> bytes:
             {
                 "artifact_id": artifact_id,
                 "media_type": "application/json",
-                "byte_size": len(artifact),
-                "sha256": hashlib.sha256(artifact).hexdigest(),
+                "byte_size": 0,
+                "sha256": hashlib.sha256(_EMPTY_ARTIFACT).hexdigest(),
                 "display_name": "query.json",
                 "source_app_id": "connect-automate",
             }
         ],
-        "parameters": {},
+        "parameters": parameters,
     }
     return json.dumps(request).encode()
 
 
 def _submit(
     provider: EomFunnelProvider,
-    artifact: bytes,
     *,
     job_id: str,
+    parameters: dict | None = None,
     artifact_id: str | None = None,
 ) -> tuple[int, dict]:
     # A real retry re-sends the identical request, so a caller replaying a job
-    # passes the same artifact_id it used the first time.
+    # passes the same artifact_id and parameters it used the first time.
     content_type, body = _multipart(
-        _job_request(job_id, artifact, artifact_id or str(uuid4())), artifact
+        _job_request(job_id, artifact_id or str(uuid4()), parameters or {}),
+        _EMPTY_ARTIFACT,
     )
     request = urllib.request.Request(
         url=f"{provider.base_url}v2/jobs", method="POST", data=body
@@ -142,11 +147,11 @@ def test_manifest_is_discoverable(wired):
 
 def test_read_completes_and_returns_the_tracker_queue(wired):
     tracker, provider = wired
-    code, status = _submit(provider, b'{"limit":25}', job_id=str(uuid4()))
+    code, status = _submit(provider, job_id=str(uuid4()), parameters={"limit": 25})
     assert code == 200, status
     assert status["status"] == "completed"
     assert _output_json(status) == _QUEUE
-    # The device proof reached the tracker with the signed query.
+    # The limit parameter reached the tracker as the signed query.
     assert tracker.state.proof_requests[-1]["query"] == "limit=25"
 
 
@@ -154,9 +159,11 @@ def test_replay_is_cached_and_does_not_recall_tracker(wired):
     tracker, provider = wired
     job_id = str(uuid4())
     artifact_id = str(uuid4())
-    _submit(provider, b'{"limit":10}', job_id=job_id, artifact_id=artifact_id)
+    _submit(provider, job_id=job_id, artifact_id=artifact_id, parameters={"limit": 10})
     calls_after_first = len(tracker.state.proof_requests)
-    code, status = _submit(provider, b'{"limit":10}', job_id=job_id, artifact_id=artifact_id)
+    code, status = _submit(
+        provider, job_id=job_id, artifact_id=artifact_id, parameters={"limit": 10}
+    )
     assert code == 200
     assert status["status"] == "completed"
     # Cached: no second tracker call for the same job.
@@ -166,9 +173,15 @@ def test_replay_is_cached_and_does_not_recall_tracker(wired):
 def test_reused_job_id_with_other_input_conflicts(wired):
     _tracker, provider = wired
     job_id = str(uuid4())
-    first_code, _ = _submit(provider, b'{"limit":10}', job_id=job_id)
+    artifact_id = str(uuid4())
+    first_code, _ = _submit(
+        provider, job_id=job_id, artifact_id=artifact_id, parameters={"limit": 10}
+    )
     assert first_code == 200
-    code, body = _submit(provider, b'{"limit":11}', job_id=job_id)
+    # Same job id, different parameters -> different request identity -> conflict.
+    code, body = _submit(
+        provider, job_id=job_id, artifact_id=artifact_id, parameters={"limit": 11}
+    )
     assert code == 409, body
     assert body["error"]["code"] == "JOB_CONFLICT"
 
@@ -176,7 +189,7 @@ def test_reused_job_id_with_other_input_conflicts(wired):
 def test_tracker_auth_error_maps_to_failed_unauthorized(wired):
     tracker, provider = wired
     tracker.force_leads_error(403, {"detail": "operator no longer authorized"})
-    code, status = _submit(provider, b"{}", job_id=str(uuid4()))
+    code, status = _submit(provider, job_id=str(uuid4()))
     assert code == 200
     assert status["status"] == "failed"
     assert status["error"]["code"] == "DEVICE_UNAUTHORIZED"
@@ -188,7 +201,7 @@ def test_retryable_tracker_error_is_not_cached_and_reattempts(wired):
     tracker.force_leads_error(503, {"detail": "temporarily unavailable"})
     job_id = str(uuid4())
     artifact_id = str(uuid4())
-    code, status = _submit(provider, b"{}", job_id=job_id, artifact_id=artifact_id)
+    code, status = _submit(provider, job_id=job_id, artifact_id=artifact_id)
     assert code == 200
     assert status["status"] == "failed"
     assert status["error"]["code"] == "TRACKER_UNAVAILABLE"
@@ -197,7 +210,7 @@ def test_retryable_tracker_error_is_not_cached_and_reattempts(wired):
     # Clear the fault; a re-POST of the SAME job id re-attempts (not cached) and
     # now completes.
     tracker.force_leads_error(200)
-    code, status = _submit(provider, b"{}", job_id=job_id, artifact_id=artifact_id)
+    code, status = _submit(provider, job_id=job_id, artifact_id=artifact_id)
     assert code == 200
     assert status["status"] == "completed"
     assert _output_json(status) == _QUEUE
@@ -205,7 +218,6 @@ def test_retryable_tracker_error_is_not_cached_and_reattempts(wired):
 
 def test_bad_capability_version_is_rejected(wired):
     _tracker, provider = wired
-    artifact = b"{}"
     request = {
         "protocol_version": 2,
         "job_id": str(uuid4()),
@@ -214,15 +226,15 @@ def test_bad_capability_version_is_rejected(wired):
             {
                 "artifact_id": str(uuid4()),
                 "media_type": "application/json",
-                "byte_size": len(artifact),
-                "sha256": hashlib.sha256(artifact).hexdigest(),
+                "byte_size": 0,
+                "sha256": hashlib.sha256(_EMPTY_ARTIFACT).hexdigest(),
                 "display_name": "q.json",
                 "source_app_id": "connect-automate",
             }
         ],
         "parameters": {},
     }
-    content_type, body = _multipart(json.dumps(request).encode(), artifact)
+    content_type, body = _multipart(json.dumps(request).encode(), _EMPTY_ARTIFACT)
     req = urllib.request.Request(url=f"{provider.base_url}v2/jobs", method="POST", data=body)
     req.add_header("Authorization", f"Bearer {provider.token}")
     req.add_header("Content-Type", content_type)
@@ -233,3 +245,11 @@ def test_bad_capability_version_is_rejected(wired):
         code, payload = error.code, json.loads(error.read())
     assert code == 400
     assert payload["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_bad_parameter_is_rejected(wired):
+    _tracker, provider = wired
+    # limit out of range is a malformed request -> 400, before any tracker call.
+    code, body = _submit(provider, job_id=str(uuid4()), parameters={"limit": 0})
+    assert code == 400, body
+    assert body["error"]["code"] == "INVALID_REQUEST"
