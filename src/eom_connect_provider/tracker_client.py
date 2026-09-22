@@ -26,6 +26,7 @@ APPROVE_SEND_PATH = "/api/connect/device/funnel/onboarding-drafts/{draft_id}/app
 ESTIMATE_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/estimate-bookings"
 FIRST_CLEAN_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/first-clean-bookings"
 CUSTOMER_HANDOFF_PATH = "/api/connect/device/funnel/leads/{contact_id}/customer-handoffs"
+MARK_WORKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/working"
 
 
 class TrackerError(Exception):
@@ -183,6 +184,36 @@ class TrackerClient:
         path = CUSTOMER_HANDOFF_PATH.format(contact_id=contact_id)
         body = json.dumps(
             {**handoff, "challengeId": challenge_id, "confirmationId": confirmation_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        headers = access_proof_headers(
+            self.credential.private_key,
+            self.credential.device_id,
+            method="POST",
+            path=path,
+            query="",
+            body=body,
+        )
+        url = f"{self._root()}{path}"
+        return self._request("POST", url, headers=headers, body=body)
+
+    def mark_lead_working(
+        self, contact_id: str, challenge_id: str, confirmation_id: str, expected_state_token: str
+    ) -> dict[str, object]:
+        """Claim a review-queue lead as being worked on the bound operator's behalf.
+
+        Confirmation-gated mutation on the shared money seam. Optimistic on the
+        lead's ``expectedStateToken`` (read from the review queue); the tracker
+        returns 409 if that token is stale. Returns the tracker's workingLead receipt.
+        """
+        path = MARK_WORKING_PATH.format(contact_id=contact_id)
+        body = json.dumps(
+            {
+                "challengeId": challenge_id,
+                "confirmationId": confirmation_id,
+                "expectedStateToken": expected_state_token,
+            },
             separators=(",", ":"),
             sort_keys=True,
         ).encode()

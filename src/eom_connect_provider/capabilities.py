@@ -47,6 +47,12 @@ CUSTOMER_HANDOFF_CAPABILITY_ID = "lead.customer-handoff"
 CUSTOMER_HANDOFF_INPUT_MEDIA_TYPE = "application/vnd.eom.customer-handoff+json"
 CUSTOMER_HANDOFF_RECEIPT_MEDIA_TYPE = "application/vnd.eom.customer-handoff-receipt+json"
 
+# Money: claim a review-queue lead as being worked. Maps to the tracker device money
+# path POST /api/connect/device/funnel/leads/{contact_id}/working.
+MARK_WORKING_CAPABILITY_ID = "lead.mark-working"
+MARK_WORKING_INPUT_MEDIA_TYPE = "application/vnd.eom.mark-working+json"
+MARK_WORKING_RECEIPT_MEDIA_TYPE = "application/vnd.eom.mark-working-receipt+json"
+
 # Reads carry an empty artifact (limit/cursor ride in job parameters, matching the
 # canonical read convention). Money paths carry a small opaque vendor JSON artifact;
 # bookings carry the appointment window, so they get the larger canonical cap.
@@ -189,6 +195,29 @@ def customer_handoff_capability() -> dict[str, object]:
     }
 
 
+def mark_working_capability() -> dict[str, object]:
+    return {
+        "id": MARK_WORKING_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Mark lead working",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Claim a review-queue lead as being worked, so it is no longer "
+                "offered to another operator. Optimistic on the lead's state token; "
+                "a stale token conflicts. Creates durable state and requires a fresh "
+                "operator approval."
+            ),
+        },
+        "accepts": [
+            {"media_type": MARK_WORKING_INPUT_MEDIA_TYPE, "max_bytes": MONEY_MAX_INPUT_BYTES}
+        ],
+        "produces": [MARK_WORKING_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
 @dataclass(frozen=True)
 class CapabilitySpec:
     """A served capability plus the envelope metadata the provider validates against.
@@ -255,6 +284,14 @@ def _specs() -> list[CapabilitySpec]:
             max_input_bytes=BOOKING_MAX_INPUT_BYTES,
             produces_media_type=CUSTOMER_HANDOFF_RECEIPT_MEDIA_TYPE,
             output_display_name="customer-handoff-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=mark_working_capability(),
+            kind=KIND_MONEY,
+            input_media_type=MARK_WORKING_INPUT_MEDIA_TYPE,
+            max_input_bytes=MONEY_MAX_INPUT_BYTES,
+            produces_media_type=MARK_WORKING_RECEIPT_MEDIA_TYPE,
+            output_display_name="mark-working-receipt.json",
         ),
     ]
 
