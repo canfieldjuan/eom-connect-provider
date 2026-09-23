@@ -66,12 +66,24 @@ MARK_WORKING_CAPABILITY_ID = "lead.mark-working"
 MARK_WORKING_INPUT_MEDIA_TYPE = "application/vnd.eom.mark-working+json"
 MARK_WORKING_RECEIPT_MEDIA_TYPE = "application/vnd.eom.mark-working-receipt+json"
 
+# Money: disposition a lead as lost, and its inverse, reopen a lost lead. Map to the
+# tracker device paths POST /api/connect/device/funnel/leads/{contact_id}/lost|reopen.
+LEAD_LOST_CAPABILITY_ID = "lead.lost"
+LEAD_LOST_INPUT_MEDIA_TYPE = "application/vnd.eom.lead-loss+json"
+LEAD_LOST_RECEIPT_MEDIA_TYPE = "application/vnd.eom.lead-loss-receipt+json"
+LEAD_REOPEN_CAPABILITY_ID = "lead.reopen"
+LEAD_REOPEN_INPUT_MEDIA_TYPE = "application/vnd.eom.lead-reopen+json"
+LEAD_REOPEN_RECEIPT_MEDIA_TYPE = "application/vnd.eom.lead-reopen-receipt+json"
+
 # Reads carry an empty artifact (limit/cursor ride in job parameters, matching the
 # canonical read convention). Money paths carry a small opaque vendor JSON artifact;
 # bookings carry the appointment window, so they get the larger canonical cap.
 READ_MAX_INPUT_BYTES = 1024
 MONEY_MAX_INPUT_BYTES = 1024
 BOOKING_MAX_INPUT_BYTES = 8192
+# A lead loss carries a reason code and an optional free-text note (up to 1000
+# characters on the tracker), so it gets the canonical 2048-byte cap.
+LEAD_LOST_MAX_INPUT_BYTES = 2048
 
 # Dispatch kinds.
 KIND_READ = "read"
@@ -293,6 +305,53 @@ def mark_working_capability() -> dict[str, object]:
     }
 
 
+def lead_lost_capability() -> dict[str, object]:
+    return {
+        "id": LEAD_LOST_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Mark lead lost",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Disposition a lead that will not convert with a reason code and "
+                "optional note; it leaves the review queue. A won lead first cancels "
+                "its persisted first-clean calendar event and revokes its unsent "
+                "onboarding draft, so it is never reported lost after an uncertain "
+                "teardown. Idempotent by the operation key. Requires a fresh operator "
+                "approval."
+            ),
+        },
+        "accepts": [
+            {"media_type": LEAD_LOST_INPUT_MEDIA_TYPE, "max_bytes": LEAD_LOST_MAX_INPUT_BYTES}
+        ],
+        "produces": [LEAD_LOST_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
+def lead_reopen_capability() -> dict[str, object]:
+    return {
+        "id": LEAD_REOPEN_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Reopen lost lead",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Return a previously-lost lead to its pre-loss active stage. "
+                "Idempotent by the operation key; a lead that is not lost cannot be "
+                "reopened. Requires a fresh operator approval."
+            ),
+        },
+        "accepts": [
+            {"media_type": LEAD_REOPEN_INPUT_MEDIA_TYPE, "max_bytes": MONEY_MAX_INPUT_BYTES}
+        ],
+        "produces": [LEAD_REOPEN_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
 @dataclass(frozen=True)
 class CapabilitySpec:
     """A served capability plus the envelope metadata the provider validates against.
@@ -383,6 +442,22 @@ def _specs() -> list[CapabilitySpec]:
             max_input_bytes=MONEY_MAX_INPUT_BYTES,
             produces_media_type=MARK_WORKING_RECEIPT_MEDIA_TYPE,
             output_display_name="mark-working-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=lead_lost_capability(),
+            kind=KIND_MONEY,
+            input_media_type=LEAD_LOST_INPUT_MEDIA_TYPE,
+            max_input_bytes=LEAD_LOST_MAX_INPUT_BYTES,
+            produces_media_type=LEAD_LOST_RECEIPT_MEDIA_TYPE,
+            output_display_name="lead-loss-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=lead_reopen_capability(),
+            kind=KIND_MONEY,
+            input_media_type=LEAD_REOPEN_INPUT_MEDIA_TYPE,
+            max_input_bytes=MONEY_MAX_INPUT_BYTES,
+            produces_media_type=LEAD_REOPEN_RECEIPT_MEDIA_TYPE,
+            output_display_name="lead-reopen-receipt.json",
         ),
     ]
 

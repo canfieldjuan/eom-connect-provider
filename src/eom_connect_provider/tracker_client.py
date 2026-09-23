@@ -29,6 +29,8 @@ ESTIMATE_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/estimate-
 FIRST_CLEAN_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/first-clean-bookings"
 CUSTOMER_HANDOFF_PATH = "/api/connect/device/funnel/leads/{contact_id}/customer-handoffs"
 MARK_WORKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/working"
+LEAD_LOST_PATH = "/api/connect/device/funnel/leads/{contact_id}/lost"
+LEAD_REOPEN_PATH = "/api/connect/device/funnel/leads/{contact_id}/reopen"
 
 
 class TrackerError(Exception):
@@ -148,12 +150,60 @@ class TrackerClient:
         """Shared device-signed POST for a draft-keyed, confirmation-gated operation:
         the draft id is the path parameter and the body carries only the challenge and
         confirmation, so every draft operation signs identically."""
-        path = path_template.format(draft_id=draft_id)
-        body = json.dumps(
+        return self._signed_json_post(
+            path_template.format(draft_id=draft_id),
             {"challengeId": challenge_id, "confirmationId": confirmation_id},
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
+        )
+
+    def mark_lead_lost(
+        self,
+        contact_id: str,
+        challenge_id: str,
+        confirmation_id: str,
+        reason_code: str,
+        idempotency_key: str,
+        note: str | None = None,
+    ) -> dict[str, object]:
+        """Disposition a lead as lost on the bound operator's behalf.
+
+        Confirmation-gated: the operator's ``confirmationId`` is bound to this contact,
+        reason code, and ``idempotencyKey`` (the note is not bound). The key is the
+        durable identity Atlas dedupes a retry against. The note is omitted when
+        absent. Returns the tracker's ``{success, lead}`` body.
+        """
+        fields: dict[str, object] = {
+            "challengeId": challenge_id,
+            "confirmationId": confirmation_id,
+            "reasonCode": reason_code,
+            "idempotencyKey": idempotency_key,
+        }
+        if note is not None:
+            fields["note"] = note
+        return self._signed_json_post(LEAD_LOST_PATH.format(contact_id=contact_id), fields)
+
+    def reopen_lead(
+        self, contact_id: str, challenge_id: str, confirmation_id: str, idempotency_key: str
+    ) -> dict[str, object]:
+        """Return a lost lead to its pre-loss active stage for the bound operator.
+
+        Confirmation-gated: the ``confirmationId`` is bound to this contact and
+        ``idempotencyKey``. A lead that is not lost conflicts (409). Returns the
+        tracker's ``{success, lead}`` body.
+        """
+        return self._signed_json_post(
+            LEAD_REOPEN_PATH.format(contact_id=contact_id),
+            {
+                "challengeId": challenge_id,
+                "confirmationId": confirmation_id,
+                "idempotencyKey": idempotency_key,
+            },
+        )
+
+    def _signed_json_post(self, path: str, fields: dict[str, object]) -> dict[str, object]:
+        """Device-signed JSON POST: serialize ``fields`` canonically, sign the exact
+        method, path, empty query, and body bytes, and send those same bytes, so the
+        proof the tracker reconstructs matches byte-for-byte."""
+        body = json.dumps(fields, separators=(",", ":"), sort_keys=True).encode()
         headers = access_proof_headers(
             self.credential.private_key,
             self.credential.device_id,

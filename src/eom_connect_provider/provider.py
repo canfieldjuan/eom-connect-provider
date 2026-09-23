@@ -77,6 +77,20 @@ class TrackerGateway(Protocol):
         self, draft_id: str, challenge_id: str, confirmation_id: str
     ) -> dict[str, object]: ...
 
+    def mark_lead_lost(
+        self,
+        contact_id: str,
+        challenge_id: str,
+        confirmation_id: str,
+        reason_code: str,
+        idempotency_key: str,
+        note: str | None = None,
+    ) -> dict[str, object]: ...
+
+    def reopen_lead(
+        self, contact_id: str, challenge_id: str, confirmation_id: str, idempotency_key: str
+    ) -> dict[str, object]: ...
+
 
 # Cap the whole multipart body: the largest declared input artifact plus generous
 # slack for the request part and MIME framing.
@@ -392,6 +406,22 @@ class _Handler(BaseHTTPRequestHandler):
                 parsed["confirmationId"],
                 parsed["expectedStateToken"],
             )
+        if spec.capability_id == capabilities.LEAD_LOST_CAPABILITY_ID:
+            return self.server.tracker.mark_lead_lost(
+                parsed["contactId"],
+                challenge_id,
+                parsed["confirmationId"],
+                parsed["reasonCode"],
+                parsed["idempotencyKey"],
+                note=parsed.get("note"),
+            )
+        if spec.capability_id == capabilities.LEAD_REOPEN_CAPABILITY_ID:
+            return self.server.tracker.reopen_lead(
+                parsed["contactId"],
+                challenge_id,
+                parsed["confirmationId"],
+                parsed["idempotencyKey"],
+            )
         raise TrackerError(  # pragma: no cover - the registry only holds wired ids
             "no money handler for capability", retryable=False
         )
@@ -513,6 +543,10 @@ def _parse_money_artifact(capability_id: str, artifact: bytes) -> dict[str, obje
         return _parse_customer_handoff_artifact(artifact)
     if capability_id == capabilities.MARK_WORKING_CAPABILITY_ID:
         return _parse_mark_working_artifact(artifact)
+    if capability_id == capabilities.LEAD_LOST_CAPABILITY_ID:
+        return _parse_lead_lost_artifact(artifact)
+    if capability_id == capabilities.LEAD_REOPEN_CAPABILITY_ID:
+        return _parse_lead_reopen_artifact(artifact)
     raise ValueError("Unsupported money capability.")  # pragma: no cover - registry-gated
 
 
@@ -647,6 +681,96 @@ def _parse_mark_working_artifact(artifact: bytes) -> dict[str, str]:
     return {
         "contactId": value["contactId"],
         "expectedStateToken": token,
+        "confirmationId": confirmation_id,
+    }
+
+
+# Lost-lead reason codes. Set closure: CLOSED at its owner, Atlas
+# (EOMLeadLostRequest.reason_code), mirrored by the tracker's
+# FUNNEL_LEAD_LOST_REASON_CODE_PATTERN; ENUMERATED here as an unenforced copy (no
+# published source to derive from). Default for a code outside this copy: a 400
+# before any signed call, so drift fails closed (a reason added upstream is refused
+# until this copy is updated) and never spends a challenge on a tracker 422.
+LEAD_LOST_REASON_CODES = frozenset(
+    {"spam", "no_response", "declined_after_estimate", "price", "other"}
+)
+_LEAD_LOST_NOTE_MAX_CHARS = 1000
+
+
+def _parse_lead_lost_artifact(artifact: bytes) -> dict[str, str]:
+    """Parse a lead-loss input artifact
+    ``{contactId, reasonCode, idempotencyKey, confirmationId, note?}``.
+
+    ``contactId`` becomes a URL path segment on the tracker (a uuid there, so this also
+    blocks path injection). ``reasonCode`` is one of the tracker's closed reason codes.
+    ``idempotencyKey`` is a uuid (the durable identity Atlas dedupes a retry against).
+    ``note`` is optional free text up to 1000 characters. ``confirmationId`` is the
+    operator's single-use token, carried opaque. Raises ``ValueError`` on a malformed
+    value so the caller maps it to a 400.
+    """
+    try:
+        value = json.loads(artifact)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("Lead-loss artifact is not valid JSON.") from error
+    required = {"contactId", "reasonCode", "idempotencyKey", "confirmationId"}
+    if not isinstance(value, dict) or not required <= set(value) <= required | {"note"}:
+        raise ValueError(
+            "Lead-loss artifact must be "
+            "{contactId, reasonCode, idempotencyKey, confirmationId, note?}."
+        )
+    if not _is_uuid(value["contactId"]):
+        raise ValueError("Lead-loss contactId must be a uuid.")
+    if value["reasonCode"] not in LEAD_LOST_REASON_CODES:
+        raise ValueError(
+            "Lead-loss reasonCode must be one of: " + ", ".join(sorted(LEAD_LOST_REASON_CODES))
+        )
+    if not _is_uuid(value["idempotencyKey"]):
+        raise ValueError("Lead-loss idempotencyKey must be a uuid.")
+    confirmation_id = value["confirmationId"]
+    if not isinstance(confirmation_id, str) or not 1 <= len(confirmation_id) <= 64:
+        raise ValueError("Lead-loss confirmationId must be a 1..64 character string.")
+    parsed = {
+        "contactId": value["contactId"],
+        "reasonCode": value["reasonCode"],
+        "idempotencyKey": value["idempotencyKey"],
+        "confirmationId": confirmation_id,
+    }
+    if "note" in value:
+        note = value["note"]
+        if not isinstance(note, str) or len(note) > _LEAD_LOST_NOTE_MAX_CHARS:
+            raise ValueError("Lead-loss note must be a string of at most 1000 characters.")
+        parsed["note"] = note
+    return parsed
+
+
+def _parse_lead_reopen_artifact(artifact: bytes) -> dict[str, str]:
+    """Parse a lead-reopen input artifact ``{contactId, idempotencyKey, confirmationId}``.
+
+    Same field rules as the lead-loss artifact, without the reason and note. Raises
+    ``ValueError`` on a malformed value so the caller maps it to a 400.
+    """
+    try:
+        value = json.loads(artifact)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("Lead-reopen artifact is not valid JSON.") from error
+    if not isinstance(value, dict) or set(value) != {
+        "contactId",
+        "idempotencyKey",
+        "confirmationId",
+    }:
+        raise ValueError(
+            "Lead-reopen artifact must be {contactId, idempotencyKey, confirmationId}."
+        )
+    if not _is_uuid(value["contactId"]):
+        raise ValueError("Lead-reopen contactId must be a uuid.")
+    if not _is_uuid(value["idempotencyKey"]):
+        raise ValueError("Lead-reopen idempotencyKey must be a uuid.")
+    confirmation_id = value["confirmationId"]
+    if not isinstance(confirmation_id, str) or not 1 <= len(confirmation_id) <= 64:
+        raise ValueError("Lead-reopen confirmationId must be a 1..64 character string.")
+    return {
+        "contactId": value["contactId"],
+        "idempotencyKey": value["idempotencyKey"],
         "confirmationId": confirmation_id,
     }
 

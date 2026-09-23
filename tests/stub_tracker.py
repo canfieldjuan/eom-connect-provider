@@ -33,6 +33,8 @@ _ESTIMATE_BOOKING_SUFFIX = "/estimate-bookings"
 _FIRST_CLEAN_BOOKING_SUFFIX = "/first-clean-bookings"
 _CUSTOMER_HANDOFF_SUFFIX = "/customer-handoffs"
 _MARK_WORKING_SUFFIX = "/working"
+_LEAD_LOST_SUFFIX = "/lost"
+_LEAD_REOPEN_SUFFIX = "/reopen"
 
 
 def _b64u_decode(value: str) -> bytes:
@@ -103,6 +105,10 @@ class _State:
     handoff_error: dict[str, object] | None = None
     working_status: int = 200
     working_error: dict[str, object] | None = None
+    lost_status: int = 200
+    lost_error: dict[str, object] | None = None
+    reopen_status: int = 200
+    reopen_error: dict[str, object] | None = None
     challenge: str = "challenge-fixture-token"
     lock: threading.Lock = field(default_factory=threading.Lock)
     proof_requests: list[dict[str, str]] = field(default_factory=list)
@@ -111,6 +117,9 @@ class _State:
     booking_requests: list[dict[str, object]] = field(default_factory=list)
     handoff_requests: list[dict[str, object]] = field(default_factory=list)
     working_requests: list[dict[str, object]] = field(default_factory=list)
+    # Lost and reopen both record here; each entry carries its ``kind`` and the
+    # exact body the tracker received.
+    disposition_requests: list[dict[str, object]] = field(default_factory=list)
 
 
 class _Server(ThreadingHTTPServer):
@@ -352,7 +361,42 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._json(status, _working_receipt(contact_id))
             return
+        disposition = self._match_disposition(path)
+        if disposition is not None:
+            contact_id, kind = disposition
+            if self._verify_proof("POST", path, query, body) is None:
+                return
+            try:
+                parsed = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                self._json(400, {"detail": f"{kind} body invalid"})
+                return
+            with state.lock:
+                state.disposition_requests.append(
+                    {"contactId": contact_id, "kind": kind, "body": parsed}
+                )
+                status = state.lost_status if kind == "lost" else state.reopen_status
+                error = state.lost_error if kind == "lost" else state.reopen_error
+            if status not in (200, 201):
+                self._json(status, error or {"detail": "forced error"})
+                return
+            # The tracker relays the Atlas lead echo verbatim as ``lead``.
+            lead_stage = "lost" if kind == "lost" else "new"
+            self._json(
+                status,
+                {"success": True, "lead": {"contact_id": contact_id, "lead_stage": lead_stage}},
+            )
+            return
         self._json(404, {"detail": "not found"})
+
+    @staticmethod
+    def _match_disposition(path: str) -> tuple[str, str] | None:
+        if not path.startswith(_LEADS_PREFIX):
+            return None
+        for suffix, kind in ((_LEAD_LOST_SUFFIX, "lost"), (_LEAD_REOPEN_SUFFIX, "reopen")):
+            if path.endswith(suffix):
+                return path[len(_LEADS_PREFIX) : -len(suffix)], kind
+        return None
 
     @staticmethod
     def _match_booking(path: str) -> tuple[str, str] | None:
@@ -448,6 +492,16 @@ class StubTracker:
         with self.state.lock:
             self.state.working_status = status
             self.state.working_error = error
+
+    def set_lost_status(self, status: int, error: dict[str, object] | None = None) -> None:
+        with self.state.lock:
+            self.state.lost_status = status
+            self.state.lost_error = error
+
+    def set_reopen_status(self, status: int, error: dict[str, object] | None = None) -> None:
+        with self.state.lock:
+            self.state.reopen_status = status
+            self.state.reopen_error = error
 
     def stop(self) -> None:
         self.server.shutdown()
