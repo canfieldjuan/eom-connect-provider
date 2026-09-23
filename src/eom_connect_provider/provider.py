@@ -685,9 +685,12 @@ def _parse_mark_working_artifact(artifact: bytes) -> dict[str, str]:
     }
 
 
-# The closed set of lost-lead reason codes the tracker accepts (its
-# FUNNEL_LEAD_LOST_REASON_CODE_PATTERN). Checked here so an unknown reason is a 400
-# before any signed call rather than a tracker 422 after a spent challenge.
+# Lost-lead reason codes. Set closure: CLOSED at its owner, Atlas
+# (EOMLeadLostRequest.reason_code), mirrored by the tracker's
+# FUNNEL_LEAD_LOST_REASON_CODE_PATTERN; ENUMERATED here as an unenforced copy (no
+# published source to derive from). Default for a code outside this copy: a 400
+# before any signed call, so drift fails closed (a reason added upstream is refused
+# until this copy is updated) and never spends a challenge on a tracker 422.
 LEAD_LOST_REASON_CODES = frozenset(
     {"spam", "no_response", "declined_after_estimate", "price", "other"}
 )
