@@ -26,6 +26,11 @@ APP_VERSION = "0.1.0"
 REVIEW_QUEUE_LIST_CAPABILITY_ID = "lead.review-queue.list"
 REVIEW_QUEUE_MEDIA_TYPE = "application/vnd.eom.funnel-review-queue+json"
 
+# Read: the issued onboarding links poll. Maps to
+# GET /api/connect/device/funnel/public-onboarding/issued-links.
+PUBLIC_LINK_LIST_CAPABILITY_ID = "onboarding.public-link.list"
+PUBLIC_LINK_LIST_MEDIA_TYPE = "application/vnd.eom.onboarding.issued-link-list+json"
+
 # Money: approve-and-send an onboarding draft. Maps to the tracker device money path
 # POST /api/connect/device/funnel/onboarding-drafts/{draft_id}/approve-send.
 APPROVE_SEND_CAPABILITY_ID = "onboarding.draft.approve-send"
@@ -88,6 +93,41 @@ def review_queue_capability() -> dict[str, object]:
                 "required": False,
                 "label": "Limit",
                 "description": "Maximum number of leads to return in one page.",
+            },
+            {
+                "name": "cursor",
+                "value_type": "string",
+                "required": False,
+                "label": "Cursor",
+                "description": "Opaque pagination cursor returned by a prior page.",
+            },
+        ],
+        "effects": {"external": False, "confirmation_required": False},
+    }
+
+
+def public_link_list_capability() -> dict[str, object]:
+    return {
+        "id": PUBLIC_LINK_LIST_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "List issued onboarding links",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "List durable public-onboarding tokens that remain issued for office "
+                "follow-up. Read-only projection; alters no handoff, delivery, or "
+                "token state."
+            ),
+        },
+        "accepts": [{"media_type": "application/json", "max_bytes": READ_MAX_INPUT_BYTES}],
+        "produces": [PUBLIC_LINK_LIST_MEDIA_TYPE],
+        "parameters": [
+            {
+                "name": "limit",
+                "value_type": "integer",
+                "required": False,
+                "label": "Limit",
+                "description": "Maximum number of issued links to return in one page.",
             },
             {
                 "name": "cursor",
@@ -252,6 +292,14 @@ def _specs() -> list[CapabilitySpec]:
             max_input_bytes=READ_MAX_INPUT_BYTES,
             produces_media_type=REVIEW_QUEUE_MEDIA_TYPE,
             output_display_name="funnel-review-queue.json",
+        ),
+        CapabilitySpec(
+            definition=public_link_list_capability(),
+            kind=KIND_READ,
+            input_media_type="application/json",
+            max_input_bytes=READ_MAX_INPUT_BYTES,
+            produces_media_type=PUBLIC_LINK_LIST_MEDIA_TYPE,
+            output_display_name="issued-onboarding-links.json",
         ),
         CapabilitySpec(
             definition=approve_send_capability(),

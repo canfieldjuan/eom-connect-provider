@@ -63,6 +63,10 @@ class TrackerGateway(Protocol):
         self, *, limit: int, cursor: str | None
     ) -> dict[str, object]: ...
 
+    def list_issued_links(
+        self, *, limit: int, cursor: str | None
+    ) -> dict[str, object]: ...
+
     def mint_operation_challenge(self) -> dict[str, object]: ...
 
     def approve_send(
@@ -281,7 +285,7 @@ class _Handler(BaseHTTPRequestHandler):
         if spec.kind == capabilities.KIND_READ:
             # limit/cursor are job parameters (canonical read convention); the single
             # input artifact carries no body.
-            _parse_review_queue_parameters(request["parameters"])
+            _parse_read_parameters(request["parameters"])
             if len(artifact) != 0:
                 raise ValueError("A read carries an empty input artifact.")
         elif spec.kind == capabilities.KIND_MONEY:
@@ -305,9 +309,9 @@ class _Handler(BaseHTTPRequestHandler):
         self, spec: CapabilitySpec, request: dict[str, object], artifact: bytes
     ) -> dict[str, object]:
         try:
-            limit, cursor = _parse_review_queue_parameters(request["parameters"])
-            queue = self.server.tracker.get_funnel_leads(limit=limit, cursor=cursor)
-            output = json.dumps(queue, separators=(",", ":"), sort_keys=True).encode()
+            limit, cursor = _parse_read_parameters(request["parameters"])
+            result = self._dispatch_read(spec, limit, cursor)
+            output = json.dumps(result, separators=(",", ":"), sort_keys=True).encode()
             return self._status(spec, request, artifact, result_output=output)
         except ValueError as error:
             return self._status(
@@ -319,6 +323,18 @@ class _Handler(BaseHTTPRequestHandler):
             )
         except TrackerError as error:
             return self._status(spec, request, artifact, error=_map_tracker_error(error))
+
+    def _dispatch_read(
+        self, spec: CapabilitySpec, limit: int, cursor: str | None
+    ) -> dict[str, object]:
+        """Run one read against its tracker endpoint, chosen by capability id."""
+        if spec.capability_id == capabilities.REVIEW_QUEUE_LIST_CAPABILITY_ID:
+            return self.server.tracker.get_funnel_leads(limit=limit, cursor=cursor)
+        if spec.capability_id == capabilities.PUBLIC_LINK_LIST_CAPABILITY_ID:
+            return self.server.tracker.list_issued_links(limit=limit, cursor=cursor)
+        raise TrackerError(  # pragma: no cover - the registry only holds wired ids
+            "no read handler for capability", retryable=False
+        )
 
     def _run_money(
         self, spec: CapabilitySpec, request: dict[str, object], artifact: bytes
@@ -447,12 +463,13 @@ def _map_tracker_error(error: TrackerError) -> tuple[str, str, bool]:
     return "TRACKER_ERROR", str(error), False
 
 
-def _parse_review_queue_parameters(parameters: object) -> tuple[int, str | None]:
-    """Parse the review-queue job parameters ``{"limit"?: int, "cursor"?: str}``.
+def _parse_read_parameters(parameters: object) -> tuple[int, str | None]:
+    """Parse a paged read's job parameters ``{"limit"?: int, "cursor"?: str}``.
 
-    limit/cursor ride in the Connect job parameters (canonical read convention), not
-    the input artifact, which is empty. Raises ``ValueError`` on a malformed value so
-    the caller maps it to a 400.
+    Shared by every read capability (review-queue, issued-links): limit/cursor ride in
+    the Connect job parameters (canonical read convention), not the input artifact,
+    which is empty. Raises ``ValueError`` on a malformed value so the caller maps it to
+    a 400.
     """
     if not isinstance(parameters, dict) or set(parameters) - {"limit", "cursor"}:
         raise ValueError("Parameters must be an object with optional limit/cursor.")

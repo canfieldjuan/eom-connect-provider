@@ -21,6 +21,7 @@ _DEFAULT_TIMEOUT_S = 30
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 FUNNEL_LEADS_PATH = "/api/connect/device/funnel/leads"
+ISSUED_LINKS_PATH = "/api/connect/device/funnel/public-onboarding/issued-links"
 OPERATION_CHALLENGE_PATH = "/api/connect/device/operations/challenge"
 APPROVE_SEND_PATH = "/api/connect/device/funnel/onboarding-drafts/{draft_id}/approve-send"
 ESTIMATE_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/estimate-bookings"
@@ -60,20 +61,37 @@ class TrackerClient:
         (``success, leads, workingLeads, pendingHandoffs, cursor, hasMore,
         nextCursor, capabilities, capabilitiesDeclared``).
         """
+        return self._paged_read(FUNNEL_LEADS_PATH, limit=limit, cursor=cursor)
+
+    def list_issued_links(
+        self, *, limit: int = 100, cursor: str | None = None
+    ) -> dict[str, object]:
+        """Device poll of the current issued-onboarding-link evidence.
+
+        Read-only; carries no confirmation. Returns the tracker's JSON body
+        (``success, links, limit, cursor, hasMore, nextCursor``).
+        """
+        return self._paged_read(ISSUED_LINKS_PATH, limit=limit, cursor=cursor)
+
+    def _paged_read(
+        self, path: str, *, limit: int, cursor: str | None
+    ) -> dict[str, object]:
+        """Shared device-signed GET for a limit/cursor read: sign the exact path and
+        raw query we send so the proof the tracker reconstructs matches byte-for-byte.
+        """
         params: list[tuple[str, str]] = [("limit", str(int(limit)))]
         if cursor:
             params.append(("cursor", cursor))
-        # Sign the exact query string we send: urlencode with a stable order.
         query = urllib.parse.urlencode(params)
         headers = access_proof_headers(
             self.credential.private_key,
             self.credential.device_id,
             method="GET",
-            path=FUNNEL_LEADS_PATH,
+            path=path,
             query=query,
             body=b"",
         )
-        url = f"{self._root()}{FUNNEL_LEADS_PATH}?{query}"
+        url = f"{self._root()}{path}?{query}"
         return self._request("GET", url, headers=headers, body=None)
 
     def mint_operation_challenge(self) -> dict[str, object]:

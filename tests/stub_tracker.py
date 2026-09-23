@@ -88,6 +88,7 @@ def _working_receipt(contact_id: str) -> dict[str, object]:
 class _State:
     public_keys: dict[str, bytes] = field(default_factory=dict)
     queue_body: dict[str, object] = field(default_factory=dict)
+    issued_links_body: dict[str, object] = field(default_factory=dict)
     leads_status: int = 200
     leads_error: dict[str, object] | None = None
     approve_send_status: int = 201
@@ -332,15 +333,20 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         state = self.server.state
         path, _, query = self.path.partition("?")
-        if path != "/api/connect/device/funnel/leads":
-            self._json(404, {"detail": "not found"})
+        if path == "/api/connect/device/funnel/leads":
+            if self._verify_proof("GET", path, query, b"") is None:
+                return
+            if state.leads_status != 200:
+                self._json(state.leads_status, state.leads_error or {"detail": "forced error"})
+                return
+            self._json(200, state.queue_body)
             return
-        if self._verify_proof("GET", path, query, b"") is None:
+        if path == "/api/connect/device/funnel/public-onboarding/issued-links":
+            if self._verify_proof("GET", path, query, b"") is None:
+                return
+            self._json(200, state.issued_links_body)
             return
-        if state.leads_status != 200:
-            self._json(state.leads_status, state.leads_error or {"detail": "forced error"})
-            return
-        self._json(200, state.queue_body)
+        self._json(404, {"detail": "not found"})
 
 
 @dataclass
@@ -370,6 +376,10 @@ class StubTracker:
     def set_queue(self, body: dict[str, object]) -> None:
         with self.state.lock:
             self.state.queue_body = body
+
+    def set_issued_links(self, body: dict[str, object]) -> None:
+        with self.state.lock:
+            self.state.issued_links_body = body
 
     def force_leads_error(self, status: int, error: dict[str, object] | None = None) -> None:
         with self.state.lock:
