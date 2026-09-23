@@ -340,3 +340,50 @@ def test_host_invokes_mark_working_with_confirmation(tmp_path):
     finally:
         provider.stop()
         tracker.stop()
+
+
+def test_host_invokes_public_link_revoke_with_confirmation(tmp_path):
+    tracker = StubTracker.start()
+    private_key = Ed25519PrivateKey.generate()
+    device_id = str(uuid4())
+    tracker.register_public_key(
+        device_id, private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+    client = TrackerClient(tracker.base_url, store.DeviceCredential(device_id, private_key))
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir(mode=0o700)
+    provider = EomFunnelProvider.start(runtime_dir, client)
+    try:
+        catalog = connect.discover_capabilities(runtime_dir)
+        items = {
+            item.capability_id: item
+            for item in catalog.items
+            if item.app_id == capabilities.APP_ID
+        }
+        capability = items[capabilities.PUBLIC_LINK_REVOKE_CAPABILITY_ID]
+        assert capability.confirmation_required is True
+
+        content = json.dumps(
+            {"draftId": _DRAFT_ID, "confirmationId": _CONFIRMATION_ID}
+        ).encode()
+        media_type = capabilities.PUBLIC_LINK_REVOKE_INPUT_MEDIA_TYPE
+
+        with pytest.raises(connect.ConnectError):
+            connect.prepare_capability_job(capability, content, media_type, "revocation.json")
+
+        job = connect.prepare_capability_job(
+            capability, content, media_type, "revocation.json", confirmed=True
+        )
+        completed = connect.ConnectV2Client(capability).submit(job, content)
+        assert completed.status == "completed"
+        assert completed.result is not None
+        output = completed.result.outputs[0]
+        assert output.media_type == capabilities.PUBLIC_LINK_REVOKE_RECEIPT_MEDIA_TYPE
+        receipt = json.loads(output.payload)
+        assert receipt["draftId"] == _DRAFT_ID
+        assert receipt["status"] == "revoked"
+        assert len(tracker.state.minted_challenges) == 1
+    finally:
+        provider.stop()
+        tracker.stop()
