@@ -37,6 +37,14 @@ APPROVE_SEND_CAPABILITY_ID = "onboarding.draft.approve-send"
 APPROVE_SEND_INPUT_MEDIA_TYPE = "application/vnd.eom.onboarding-draft-approval+json"
 APPROVE_SEND_RECEIPT_MEDIA_TYPE = "application/vnd.eom.onboarding-draft-send-receipt+json"
 
+# Money: revoke a draft's issued public onboarding link. Maps to the tracker device
+# path POST /api/connect/device/funnel/onboarding-drafts/{draft_id}/revoke-link.
+PUBLIC_LINK_REVOKE_CAPABILITY_ID = "onboarding.public-link.revoke"
+PUBLIC_LINK_REVOKE_INPUT_MEDIA_TYPE = "application/vnd.eom.public-link-revocation+json"
+PUBLIC_LINK_REVOKE_RECEIPT_MEDIA_TYPE = (
+    "application/vnd.eom.public-link-revocation-receipt+json"
+)
+
 # Money: book an estimate or a first clean for a lead. Map to the tracker device
 # booking money paths POST /api/connect/device/funnel/leads/{contact_id}/{...}-bookings.
 ESTIMATE_BOOKING_CAPABILITY_ID = "lead.estimate-booking"
@@ -160,6 +168,33 @@ def approve_send_capability() -> dict[str, object]:
             {"media_type": APPROVE_SEND_INPUT_MEDIA_TYPE, "max_bytes": MONEY_MAX_INPUT_BYTES}
         ],
         "produces": [APPROVE_SEND_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
+def public_link_revoke_capability() -> dict[str, object]:
+    return {
+        "id": PUBLIC_LINK_REVOKE_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Revoke issued onboarding link",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Invalidate an issued customer onboarding link without changing "
+                "sent-email evidence. Fences a still-live token when public issuance "
+                "is disabled. Idempotent by the draft's link state: an already-revoked "
+                "link replays without a second revocation, and a completed link cannot "
+                "be revoked. Requires a fresh operator approval."
+            ),
+        },
+        "accepts": [
+            {
+                "media_type": PUBLIC_LINK_REVOKE_INPUT_MEDIA_TYPE,
+                "max_bytes": MONEY_MAX_INPUT_BYTES,
+            }
+        ],
+        "produces": [PUBLIC_LINK_REVOKE_RECEIPT_MEDIA_TYPE],
         "parameters": [],
         "effects": {"external": True, "confirmation_required": True},
     }
@@ -308,6 +343,14 @@ def _specs() -> list[CapabilitySpec]:
             max_input_bytes=MONEY_MAX_INPUT_BYTES,
             produces_media_type=APPROVE_SEND_RECEIPT_MEDIA_TYPE,
             output_display_name="onboarding-draft-send-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=public_link_revoke_capability(),
+            kind=KIND_MONEY,
+            input_media_type=PUBLIC_LINK_REVOKE_INPUT_MEDIA_TYPE,
+            max_input_bytes=MONEY_MAX_INPUT_BYTES,
+            produces_media_type=PUBLIC_LINK_REVOKE_RECEIPT_MEDIA_TYPE,
+            output_display_name="public-link-revocation-receipt.json",
         ),
         CapabilitySpec(
             definition=estimate_booking_capability(),

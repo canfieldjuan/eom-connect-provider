@@ -73,6 +73,10 @@ class TrackerGateway(Protocol):
         self, draft_id: str, challenge_id: str, confirmation_id: str
     ) -> dict[str, object]: ...
 
+    def revoke_public_link(
+        self, draft_id: str, challenge_id: str, confirmation_id: str
+    ) -> dict[str, object]: ...
+
 
 # Cap the whole multipart body: the largest declared input artifact plus generous
 # slack for the request part and MIME framing.
@@ -362,6 +366,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self.server.tracker.approve_send(
                 parsed["draftId"], challenge_id, parsed["confirmationId"]
             )
+        if spec.capability_id == capabilities.PUBLIC_LINK_REVOKE_CAPABILITY_ID:
+            return self.server.tracker.revoke_public_link(
+                parsed["draftId"], challenge_id, parsed["confirmationId"]
+            )
         booking_path = _BOOKING_PATHS.get(spec.capability_id)
         if booking_path is not None:
             return self.server.tracker.submit_booking(
@@ -488,9 +496,17 @@ _BOOKING_PATHS = {
 }
 
 
+_DRAFT_OPERATIONS = frozenset(
+    {
+        capabilities.APPROVE_SEND_CAPABILITY_ID,
+        capabilities.PUBLIC_LINK_REVOKE_CAPABILITY_ID,
+    }
+)
+
+
 def _parse_money_artifact(capability_id: str, artifact: bytes) -> dict[str, object]:
-    if capability_id == capabilities.APPROVE_SEND_CAPABILITY_ID:
-        return _parse_approve_send_artifact(artifact)
+    if capability_id in _DRAFT_OPERATIONS:
+        return _parse_draft_artifact(artifact)
     if capability_id in _BOOKING_PATHS:
         return _parse_booking_artifact(artifact)
     if capability_id == capabilities.CUSTOMER_HANDOFF_CAPABILITY_ID:
@@ -500,26 +516,27 @@ def _parse_money_artifact(capability_id: str, artifact: bytes) -> dict[str, obje
     raise ValueError("Unsupported money capability.")  # pragma: no cover - registry-gated
 
 
-def _parse_approve_send_artifact(artifact: bytes) -> dict[str, str]:
-    """Parse the approve-send input artifact ``{draftId, confirmationId}``.
+def _parse_draft_artifact(artifact: bytes) -> dict[str, str]:
+    """Parse a draft-keyed operation's input artifact ``{draftId, confirmationId}``.
 
-    Opaque vendor JSON, not a Connect envelope. ``draftId`` becomes a URL path segment
-    on the tracker (a typed UUID there), so it must be a uuid, which also blocks path
+    Shared by every draft-keyed operation (approve-send, public-link revoke). Opaque
+    vendor JSON, not a Connect envelope. ``draftId`` becomes a URL path segment on the
+    tracker (a typed UUID there), so it must be a uuid, which also blocks path
     injection. ``confirmationId`` is the operator's single-use token, carried opaque.
     Raises ``ValueError`` on a malformed value so the caller maps it to a 400.
     """
     try:
         value = json.loads(artifact)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise ValueError("Approval artifact is not valid JSON.") from error
+        raise ValueError("Draft artifact is not valid JSON.") from error
     if not isinstance(value, dict) or set(value) != {"draftId", "confirmationId"}:
-        raise ValueError("Approval artifact must be {draftId, confirmationId}.")
+        raise ValueError("Draft artifact must be {draftId, confirmationId}.")
     draft_id = value["draftId"]
     confirmation_id = value["confirmationId"]
     if not _is_uuid(draft_id):
-        raise ValueError("Approval draftId must be a uuid.")
+        raise ValueError("Draft artifact draftId must be a uuid.")
     if not isinstance(confirmation_id, str) or not 1 <= len(confirmation_id) <= 64:
-        raise ValueError("Approval confirmationId must be a 1..64 character string.")
+        raise ValueError("Draft artifact confirmationId must be a 1..64 character string.")
     return {"draftId": draft_id, "confirmationId": confirmation_id}
 
 

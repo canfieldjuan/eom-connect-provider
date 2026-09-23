@@ -26,6 +26,7 @@ _CONTEXT = "connect-device-access-v1"
 
 _APPROVE_SEND_PREFIX = "/api/connect/device/funnel/onboarding-drafts/"
 _APPROVE_SEND_SUFFIX = "/approve-send"
+_REVOKE_LINK_SUFFIX = "/revoke-link"
 
 _LEADS_PREFIX = "/api/connect/device/funnel/leads/"
 _ESTIMATE_BOOKING_SUFFIX = "/estimate-bookings"
@@ -93,6 +94,9 @@ class _State:
     leads_error: dict[str, object] | None = None
     approve_send_status: int = 201
     approve_send_error: dict[str, object] | None = None
+    revoke_status: int = 201
+    revoke_error: dict[str, object] | None = None
+    revoke_requests: list[dict[str, object]] = field(default_factory=list)
     booking_status: int = 201
     booking_error: dict[str, object] | None = None
     handoff_status: int = 201
@@ -230,6 +234,38 @@ class _Handler(BaseHTTPRequestHandler):
                     "draftId": draft_id,
                     "status": "sent",
                     "sentAt": "2026-01-01T00:00:00Z",
+                    "idempotent": status == 200,
+                },
+            )
+            return
+        if path.startswith(_APPROVE_SEND_PREFIX) and path.endswith(_REVOKE_LINK_SUFFIX):
+            draft_id = path[len(_APPROVE_SEND_PREFIX) : -len(_REVOKE_LINK_SUFFIX)]
+            if self._verify_proof("POST", path, query, body) is None:
+                return
+            try:
+                parsed = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                self._json(400, {"detail": "revoke-link body invalid"})
+                return
+            with state.lock:
+                state.revoke_requests.append(
+                    {
+                        "draftId": draft_id,
+                        "challengeId": parsed.get("challengeId"),
+                        "confirmationId": parsed.get("confirmationId"),
+                    }
+                )
+                status = state.revoke_status
+                error = state.revoke_error
+            if status not in (200, 201):
+                self._json(status, error or {"detail": "forced error"})
+                return
+            self._json(
+                status,
+                {
+                    "success": True,
+                    "draftId": draft_id,
+                    "status": "revoked",
                     "idempotent": status == 200,
                 },
             )
@@ -392,6 +428,11 @@ class StubTracker:
         with self.state.lock:
             self.state.approve_send_status = status
             self.state.approve_send_error = error
+
+    def set_revoke_status(self, status: int, error: dict[str, object] | None = None) -> None:
+        with self.state.lock:
+            self.state.revoke_status = status
+            self.state.revoke_error = error
 
     def set_booking_error(self, status: int, error: dict[str, object] | None = None) -> None:
         with self.state.lock:

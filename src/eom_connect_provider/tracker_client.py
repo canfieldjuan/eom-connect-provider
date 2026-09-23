@@ -24,6 +24,7 @@ FUNNEL_LEADS_PATH = "/api/connect/device/funnel/leads"
 ISSUED_LINKS_PATH = "/api/connect/device/funnel/public-onboarding/issued-links"
 OPERATION_CHALLENGE_PATH = "/api/connect/device/operations/challenge"
 APPROVE_SEND_PATH = "/api/connect/device/funnel/onboarding-drafts/{draft_id}/approve-send"
+PUBLIC_LINK_REVOKE_PATH = "/api/connect/device/funnel/onboarding-drafts/{draft_id}/revoke-link"
 ESTIMATE_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/estimate-bookings"
 FIRST_CLEAN_BOOKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/first-clean-bookings"
 CUSTOMER_HANDOFF_PATH = "/api/connect/device/funnel/leads/{contact_id}/customer-handoffs"
@@ -123,7 +124,31 @@ class TrackerClient:
         so an already-sent draft replays without a second send. Returns the tracker's
         sent receipt (``success, draftId, status, sentAt, idempotent``).
         """
-        path = APPROVE_SEND_PATH.format(draft_id=draft_id)
+        return self._draft_money_post(
+            APPROVE_SEND_PATH, draft_id, challenge_id, confirmation_id
+        )
+
+    def revoke_public_link(
+        self, draft_id: str, challenge_id: str, confirmation_id: str
+    ) -> dict[str, object]:
+        """Revoke one draft's issued public onboarding link for the bound operator.
+
+        Confirmation-gated, keyed by the draft id like approve-send. Atlas's link state
+        machine is the idempotency mechanism: an already-revoked link replays and a
+        completed link conflicts (409). Returns the tracker's revocation receipt
+        (``success, draftId, status, idempotent``).
+        """
+        return self._draft_money_post(
+            PUBLIC_LINK_REVOKE_PATH, draft_id, challenge_id, confirmation_id
+        )
+
+    def _draft_money_post(
+        self, path_template: str, draft_id: str, challenge_id: str, confirmation_id: str
+    ) -> dict[str, object]:
+        """Shared device-signed POST for a draft-keyed, confirmation-gated operation:
+        the draft id is the path parameter and the body carries only the challenge and
+        confirmation, so every draft operation signs identically."""
+        path = path_template.format(draft_id=draft_id)
         body = json.dumps(
             {"challengeId": challenge_id, "confirmationId": confirmation_id},
             separators=(",", ":"),
