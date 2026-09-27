@@ -38,6 +38,7 @@ def _enroll(tracker, store_dir, token=_TOKEN):
     code = cli.main(
         [
             "enroll",
+            "--paste-token",
             "--label",
             "Office desk",
             "--tracker-url",
@@ -52,7 +53,7 @@ def _enroll(tracker, store_dir, token=_TOKEN):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def test_enroll_reads_token_from_stdin_and_stores_only_the_device_key(tracker, tmp_path):
+def test_paste_token_enroll_stores_only_the_device_key(tracker, tmp_path):
     code, out, err = _enroll(tracker, tmp_path)
     assert code == cli.EXIT_OK, err
     credential = store.load_credential(tmp_path)
@@ -87,7 +88,16 @@ def test_enroll_without_a_token_stores_nothing(tracker, tmp_path):
 def test_enroll_refuses_an_insecure_tracker_url(url, tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         cli.main(
-            ["enroll", "--label", "PC", "--tracker-url", url, "--store-dir", str(tmp_path)],
+            [
+                "enroll",
+                "--paste-token",
+                "--label",
+                "PC",
+                "--tracker-url",
+                url,
+                "--store-dir",
+                str(tmp_path),
+            ],
             stdin=io.StringIO(_TOKEN + "\n"),
             stdout=io.StringIO(),
             stderr=io.StringIO(),

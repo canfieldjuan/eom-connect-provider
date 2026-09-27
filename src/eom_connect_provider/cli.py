@@ -1,10 +1,12 @@
 """Command line for the local EOM Connect provider: enroll this PC once, then run.
 
-``eom-connect-provider enroll --label NAME`` binds this PC to the operator whose
-office session token is supplied on standard input (a hidden prompt when run in a
-terminal; never a command-line argument, so it does not land in shell history or the
-process list). The token is used for the two enrollment calls and then dropped; only
-the device key is stored (credential contract, "Acquire").
+``eom-connect-provider enroll --label NAME`` binds this PC to an operator. By default
+it opens the portal in the browser, where the signed-in operator authorizes the PC;
+the office session token never leaves the browser (``browser_enrollment``). With
+``--paste-token`` it instead reads the token from standard input (a hidden prompt when
+run in a terminal; never a command-line argument, so it does not land in shell history
+or the process list), uses it for the two enrollment calls, and drops it. Either way
+only the device key is stored (credential contract, "Acquire").
 
 ``eom-connect-provider run`` loads the stored device key, serves the provider on
 loopback, and registers it where the Automate host discovers providers, until
@@ -19,14 +21,17 @@ import signal
 import sys
 import threading
 import urllib.parse
+import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
-from . import enrollment, placement, store
+from . import browser_enrollment, enrollment, placement, store
 from .provider import EomFunnelProvider
 from .tracker_client import TrackerAuthError, TrackerClient, TrackerError
 
 DEFAULT_TRACKER_URL = "https://eom-timetracker.onrender.com"
+DEFAULT_PORTAL_URL = "https://effinghamofficemaids.com"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 EXIT_OK = 0
@@ -47,8 +52,16 @@ def _tracker_url(value: str) -> str:
     if parsed.scheme == "http" and parsed.hostname in _LOOPBACK_HOSTS:
         return value.rstrip("/")
     raise argparse.ArgumentTypeError(
-        "tracker URL must be https (plain http is allowed only for a loopback tracker)"
+        "URL must be https (plain http is allowed only for a loopback host)"
     )
+
+
+def _label(value: str) -> str:
+    """The tracker accepts a 1..128 character device label."""
+    stripped = value.strip()
+    if not 1 <= len(stripped) <= 128:
+        raise argparse.ArgumentTypeError("label must be 1 to 128 characters")
+    return stripped
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -61,7 +74,16 @@ def _parser() -> argparse.ArgumentParser:
     enroll = commands.add_parser(
         "enroll", help="Bind this PC to your office account (one time)."
     )
-    enroll.add_argument("--label", required=True, help="A name for this PC, e.g. 'Office desk'.")
+    enroll.add_argument(
+        "--label", type=_label, required=True, help="A name for this PC, e.g. 'Office desk'."
+    )
+    enroll.add_argument(
+        "--paste-token",
+        action="store_true",
+        help="Read the office session token from a prompt instead of signing in "
+        "through the browser.",
+    )
+    enroll.add_argument("--portal-url", type=_tracker_url, default=DEFAULT_PORTAL_URL)
     enroll.add_argument("--tracker-url", type=_tracker_url, default=DEFAULT_TRACKER_URL)
     enroll.add_argument("--store-dir", type=Path, default=None, help=argparse.SUPPRESS)
 
@@ -78,7 +100,13 @@ def _read_office_token(stdin: TextIO, stderr: TextIO) -> str:
     return stdin.readline().strip()
 
 
-def _enroll(args: argparse.Namespace, stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
+def _enroll(
+    args: argparse.Namespace,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+    open_browser: Callable[[str], object] | None,
+) -> int:
     store_dir = args.store_dir if args.store_dir is not None else store.default_store_dir()
     existing = store.load_credential(store_dir)
     if existing is not None:
@@ -91,6 +119,20 @@ def _enroll(args: argparse.Namespace, stdin: TextIO, stdout: TextIO, stderr: Tex
             file=stderr,
         )
         return EXIT_USAGE
+    if not args.paste_token:
+        try:
+            credential = browser_enrollment.enroll_via_browser(
+                portal_url=args.portal_url,
+                label=args.label,
+                store_dir=store_dir,
+                open_browser=open_browser or webbrowser.open,
+                stdout=stdout,
+            )
+        except browser_enrollment.BrowserEnrollmentError as error:
+            print(f"Enrollment did not complete: {error}", file=stderr)
+            return EXIT_FAILED
+        print(f"Enrolled this PC as device {credential.device_id}.", file=stdout)
+        return EXIT_OK
     office_token = _read_office_token(stdin, stderr)
     if not office_token:
         print("No office session token was provided.", file=stderr)
@@ -153,13 +195,14 @@ def main(
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
+    open_browser: Callable[[str], object] | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     if args.command == "enroll":
-        return _enroll(args, stdin, stdout, stderr)
+        return _enroll(args, stdin, stdout, stderr, open_browser)
     if stop is None:
         stop = threading.Event()
         for signum in (signal.SIGINT, signal.SIGTERM):
