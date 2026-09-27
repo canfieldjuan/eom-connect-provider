@@ -75,6 +75,15 @@ LEAD_REOPEN_CAPABILITY_ID = "lead.reopen"
 LEAD_REOPEN_INPUT_MEDIA_TYPE = "application/vnd.eom.lead-reopen+json"
 LEAD_REOPEN_RECEIPT_MEDIA_TYPE = "application/vnd.eom.lead-reopen-receipt+json"
 
+# Money: soft-archive a contact, and its inverse, restore it. Map to the tracker device
+# paths POST /api/connect/device/funnel/contacts/{contact_id}/archive|restore.
+CONTACT_ARCHIVE_CAPABILITY_ID = "contact.archive"
+CONTACT_ARCHIVE_INPUT_MEDIA_TYPE = "application/vnd.eom.contact-archive+json"
+CONTACT_ARCHIVE_RECEIPT_MEDIA_TYPE = "application/vnd.eom.contact-archive-receipt+json"
+CONTACT_RESTORE_CAPABILITY_ID = "contact.restore"
+CONTACT_RESTORE_INPUT_MEDIA_TYPE = "application/vnd.eom.contact-restoration+json"
+CONTACT_RESTORE_RECEIPT_MEDIA_TYPE = "application/vnd.eom.contact-restoration-receipt+json"
+
 # Reads carry an empty artifact (limit/cursor ride in job parameters, matching the
 # canonical read convention). Money paths carry a small opaque vendor JSON artifact;
 # bookings carry the appointment window, so they get the larger canonical cap.
@@ -84,6 +93,8 @@ BOOKING_MAX_INPUT_BYTES = 8192
 # A lead loss carries a reason code and an optional free-text note (up to 1000
 # characters on the tracker), so it gets the canonical 2048-byte cap.
 LEAD_LOST_MAX_INPUT_BYTES = 2048
+# The contact lifecycle artifacts carry the canonical 2048-byte cap.
+CONTACT_LIFECYCLE_MAX_INPUT_BYTES = 2048
 
 # Dispatch kinds.
 KIND_READ = "read"
@@ -352,6 +363,57 @@ def lead_reopen_capability() -> dict[str, object]:
     }
 
 
+def contact_archive_capability() -> dict[str, object]:
+    return {
+        "id": CONTACT_ARCHIVE_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Archive contact",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Reversibly park one EOM contact out of the active directory. A "
+                "status-axis soft archive, never a delete; a won-stage lead is refused "
+                "toward the lost flow. Creates durable lifecycle state and requires a "
+                "fresh operator approval."
+            ),
+        },
+        "accepts": [
+            {
+                "media_type": CONTACT_ARCHIVE_INPUT_MEDIA_TYPE,
+                "max_bytes": CONTACT_LIFECYCLE_MAX_INPUT_BYTES,
+            }
+        ],
+        "produces": [CONTACT_ARCHIVE_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
+def contact_restore_capability() -> dict[str, object]:
+    return {
+        "id": CONTACT_RESTORE_CAPABILITY_ID,
+        "version": "1.0",
+        "action": {
+            "label": "Restore contact",
+            # Byte-identical to the connect-contracts canonical manifest object.
+            "description": (
+                "Return one archived EOM contact to the active directory, exactly as it "
+                "was. A pure status flip on the status axis. Creates durable lifecycle "
+                "state and requires a fresh operator approval."
+            ),
+        },
+        "accepts": [
+            {
+                "media_type": CONTACT_RESTORE_INPUT_MEDIA_TYPE,
+                "max_bytes": CONTACT_LIFECYCLE_MAX_INPUT_BYTES,
+            }
+        ],
+        "produces": [CONTACT_RESTORE_RECEIPT_MEDIA_TYPE],
+        "parameters": [],
+        "effects": {"external": True, "confirmation_required": True},
+    }
+
+
 @dataclass(frozen=True)
 class CapabilitySpec:
     """A served capability plus the envelope metadata the provider validates against.
@@ -458,6 +520,22 @@ def _specs() -> list[CapabilitySpec]:
             max_input_bytes=MONEY_MAX_INPUT_BYTES,
             produces_media_type=LEAD_REOPEN_RECEIPT_MEDIA_TYPE,
             output_display_name="lead-reopen-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=contact_archive_capability(),
+            kind=KIND_MONEY,
+            input_media_type=CONTACT_ARCHIVE_INPUT_MEDIA_TYPE,
+            max_input_bytes=CONTACT_LIFECYCLE_MAX_INPUT_BYTES,
+            produces_media_type=CONTACT_ARCHIVE_RECEIPT_MEDIA_TYPE,
+            output_display_name="contact-archive-receipt.json",
+        ),
+        CapabilitySpec(
+            definition=contact_restore_capability(),
+            kind=KIND_MONEY,
+            input_media_type=CONTACT_RESTORE_INPUT_MEDIA_TYPE,
+            max_input_bytes=CONTACT_LIFECYCLE_MAX_INPUT_BYTES,
+            produces_media_type=CONTACT_RESTORE_RECEIPT_MEDIA_TYPE,
+            output_display_name="contact-restoration-receipt.json",
         ),
     ]
 

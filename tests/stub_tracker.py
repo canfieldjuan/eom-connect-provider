@@ -36,6 +36,10 @@ _MARK_WORKING_SUFFIX = "/working"
 _LEAD_LOST_SUFFIX = "/lost"
 _LEAD_REOPEN_SUFFIX = "/reopen"
 
+_CONTACTS_PREFIX = "/api/connect/device/funnel/contacts/"
+_CONTACT_ARCHIVE_SUFFIX = "/archive"
+_CONTACT_RESTORE_SUFFIX = "/restore"
+
 
 def _b64u_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
@@ -109,6 +113,10 @@ class _State:
     lost_error: dict[str, object] | None = None
     reopen_status: int = 200
     reopen_error: dict[str, object] | None = None
+    archive_status: int = 201
+    archive_error: dict[str, object] | None = None
+    restore_status: int = 201
+    restore_error: dict[str, object] | None = None
     challenge: str = "challenge-fixture-token"
     lock: threading.Lock = field(default_factory=threading.Lock)
     proof_requests: list[dict[str, str]] = field(default_factory=list)
@@ -120,6 +128,8 @@ class _State:
     # Lost and reopen both record here; each entry carries its ``kind`` and the
     # exact body the tracker received.
     disposition_requests: list[dict[str, object]] = field(default_factory=list)
+    # Archive and restore both record here with their ``kind`` and exact body.
+    contact_lifecycle_requests: list[dict[str, object]] = field(default_factory=list)
 
 
 class _Server(ThreadingHTTPServer):
@@ -387,7 +397,53 @@ class _Handler(BaseHTTPRequestHandler):
                 {"success": True, "lead": {"contact_id": contact_id, "lead_stage": lead_stage}},
             )
             return
+        lifecycle = self._match_contact_lifecycle(path)
+        if lifecycle is not None:
+            contact_id, kind = lifecycle
+            if self._verify_proof("POST", path, query, body) is None:
+                return
+            try:
+                parsed = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                self._json(400, {"detail": f"{kind} body invalid"})
+                return
+            with state.lock:
+                state.contact_lifecycle_requests.append(
+                    {"contactId": contact_id, "kind": kind, "body": parsed}
+                )
+                if kind == "archive":
+                    status, error = state.archive_status, state.archive_error
+                else:
+                    status, error = state.restore_status, state.restore_error
+            if status not in (200, 201):
+                self._json(status, error or {"detail": "forced error"})
+                return
+            # The tracker's closed lifecycle receipt projection.
+            self._json(
+                status,
+                {
+                    "success": True,
+                    "contactId": contact_id,
+                    "contactType": "lead",
+                    "leadStage": "new",
+                    "status": "archived" if kind == "archive" else "active",
+                    "idempotent": status == 200,
+                },
+            )
+            return
         self._json(404, {"detail": "not found"})
+
+    @staticmethod
+    def _match_contact_lifecycle(path: str) -> tuple[str, str] | None:
+        if not path.startswith(_CONTACTS_PREFIX):
+            return None
+        for suffix, kind in (
+            (_CONTACT_ARCHIVE_SUFFIX, "archive"),
+            (_CONTACT_RESTORE_SUFFIX, "restore"),
+        ):
+            if path.endswith(suffix):
+                return path[len(_CONTACTS_PREFIX) : -len(suffix)], kind
+        return None
 
     @staticmethod
     def _match_disposition(path: str) -> tuple[str, str] | None:
@@ -502,6 +558,16 @@ class StubTracker:
         with self.state.lock:
             self.state.reopen_status = status
             self.state.reopen_error = error
+
+    def set_archive_status(self, status: int, error: dict[str, object] | None = None) -> None:
+        with self.state.lock:
+            self.state.archive_status = status
+            self.state.archive_error = error
+
+    def set_restore_status(self, status: int, error: dict[str, object] | None = None) -> None:
+        with self.state.lock:
+            self.state.restore_status = status
+            self.state.restore_error = error
 
     def stop(self) -> None:
         self.server.shutdown()
