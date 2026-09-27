@@ -16,7 +16,8 @@ makes the device-signed money POST the tracker gates on that challenge plus the
 operator's confirmation carried inside the artifact.
 
 Protocol (matching the host's Connect v2 client and the reference provider):
-- registration file under ``runtime_dir/local-connect/v2/providers/{id}.json``;
+- registration file ``{id}.json`` in the host's providers directory
+  (``placement.providers_directory``: the per-OS default, or an explicit runtime_dir);
 - ``GET /v2/manifest`` -> the capability manifest;
 - ``POST /v2/jobs`` (multipart: ``request`` + ``artifact``) -> a terminal job
   status, idempotent by ``job_id`` (409 if the id is reused for other input);
@@ -46,7 +47,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from . import capabilities, tracker_client
+from . import capabilities, placement, tracker_client
 from .capabilities import CapabilitySpec
 from .tracker_client import TrackerAuthError, TrackerError
 
@@ -812,19 +813,21 @@ def _parse_contact_key_artifact(artifact: bytes, label: str) -> dict[str, str]:
     }
 
 
-def _private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, exist_ok=True)
-    if os.name != "nt":
-        path.chmod(0o700)
-
-
 def _write_registration(path: Path, value: dict[str, object]) -> None:
+    content = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+    if os.name == "nt":
+        # The host reads a Windows registration only through its private-file checks,
+        # so write it with the host's own owner-private atomic writer.
+        from connect_automate.connect_windows import atomic_replace_bytes
+
+        atomic_replace_bytes(path, content, placement.MAX_REGISTRATION_BYTES)
+        return
     temporary = path.with_name(f".{path.name}.{uuid4()}.tmp")
     try:
         with temporary.open("xb") as stream:
             if os.name != "nt":
                 os.fchmod(stream.fileno(), 0o600)
-            stream.write(json.dumps(value, separators=(",", ":"), sort_keys=True).encode())
+            stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -840,10 +843,15 @@ class EomFunnelProvider:
     registration_path: Path
 
     @classmethod
-    def start(cls, runtime_dir: Path, tracker: TrackerGateway) -> EomFunnelProvider:
-        providers = runtime_dir / "local-connect" / "v2" / "providers"
-        for directory in (runtime_dir, runtime_dir / "local-connect", providers.parent, providers):
-            _private_directory(directory)
+    def start(cls, runtime_dir: Path | None, tracker: TrackerGateway) -> EomFunnelProvider:
+        """Serve on loopback and register where the host discovers providers.
+
+        ``runtime_dir=None`` resolves the host's default per-OS root
+        (``placement.providers_directory``); an explicit directory is for tests or a
+        host started with the same explicit root.
+        """
+        root, providers = placement.providers_directory(runtime_dir)
+        placement.ensure_providers_directory(root, providers)
         server = _Server(tracker)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

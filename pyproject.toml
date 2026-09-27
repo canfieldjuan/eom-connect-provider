@@ -2,10 +2,17 @@
 name = "eom-connect-provider"
 version = "0.1.0"
 description = "Local EOM Connect provider: fronts the EOM funnel over a per-PC device key, holding no Atlas token."
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "cryptography>=42",
+    # The Automate host package, pinned: the provider registers where the host
+    # discovers providers and, on Windows, writes its registration and device key
+    # through the host's owner-private DACL helpers (credential contract, "Store").
+    "connect-automate @ git+https://github.com/canfieldjuan/connect-automate@d68b25f8390a449126ae54bda2b156c836be7418",
 ]
+
+[project.scripts]
+eom-connect-provider = "eom_connect_provider.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -23,7 +30,7 @@ package-dir = { "" = "src" }
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

@@ -43,14 +43,31 @@ this substrate, each mapping to its existing device endpoint on the tracker.
 - `tracker_client` -- device-signed calls to the tracker device endpoints.
 - `capabilities` -- the Connect v2 capability manifest this provider advertises.
 - `provider` -- the loopback Connect v2 provider process.
+- `placement` -- where the provider registers, mirroring the host's discovery root.
+- `cli` -- the `eom-connect-provider` command.
+
+## Use on a PC
+
+```
+eom-connect-provider enroll --label "Office desk"   # once; prompts for the office session token
+eom-connect-provider run                            # serve until Ctrl+C
+```
+
+`enroll` reads the office session token from a hidden prompt (or standard input),
+uses it for the two enrollment calls, and stores only the device key. It refuses to
+enroll a PC that is already enrolled. `run` registers where the Automate host
+discovers providers: `%LOCALAPPDATA%\LocalConnect\runtime\v2\providers` on Windows,
+`$XDG_RUNTIME_DIR/local-connect/v2/providers` elsewhere. Both default to the live
+tracker; `--tracker-url` overrides it (https only, or http to a loopback tracker).
 
 ## Develop
 
 ```
-pip install -e '.[dev]'   # plus the Automate host for the integration test
+pip install -e '.[dev]'
 pytest -q
 ruff check src tests
 ```
 
-The host-integration test imports `connect_automate` (a dev/test dependency, not a
-runtime one) and is skipped when it is not installed.
+Requires Python 3.13. The Automate host package (`connect-automate`) is a pinned
+runtime dependency: the provider reuses its discovery root and, on Windows, its
+owner-private file helpers.
