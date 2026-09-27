@@ -31,6 +31,8 @@ CUSTOMER_HANDOFF_PATH = "/api/connect/device/funnel/leads/{contact_id}/customer-
 MARK_WORKING_PATH = "/api/connect/device/funnel/leads/{contact_id}/working"
 LEAD_LOST_PATH = "/api/connect/device/funnel/leads/{contact_id}/lost"
 LEAD_REOPEN_PATH = "/api/connect/device/funnel/leads/{contact_id}/reopen"
+CONTACT_ARCHIVE_PATH = "/api/connect/device/funnel/contacts/{contact_id}/archive"
+CONTACT_RESTORE_PATH = "/api/connect/device/funnel/contacts/{contact_id}/restore"
 
 
 class TrackerError(Exception):
@@ -192,6 +194,49 @@ class TrackerClient:
         """
         return self._signed_json_post(
             LEAD_REOPEN_PATH.format(contact_id=contact_id),
+            {
+                "challengeId": challenge_id,
+                "confirmationId": confirmation_id,
+                "idempotencyKey": idempotency_key,
+            },
+        )
+
+    def archive_contact(
+        self, contact_id: str, challenge_id: str, confirmation_id: str, idempotency_key: str
+    ) -> dict[str, object]:
+        """Soft-archive one contact out of the active directory for the bound operator.
+
+        Confirmation-gated: the ``confirmationId`` is bound to this contact and
+        ``idempotencyKey``. A won-stage lead conflicts (409). Returns the tracker's
+        closed lifecycle receipt (``success, contactId, contactType, leadStage, status,
+        idempotent``).
+        """
+        return self._contact_lifecycle_post(
+            CONTACT_ARCHIVE_PATH, contact_id, challenge_id, confirmation_id, idempotency_key
+        )
+
+    def restore_contact(
+        self, contact_id: str, challenge_id: str, confirmation_id: str, idempotency_key: str
+    ) -> dict[str, object]:
+        """Return one archived contact to the active directory for the bound operator.
+
+        Confirmation-gated like archive; returns the same closed lifecycle receipt.
+        """
+        return self._contact_lifecycle_post(
+            CONTACT_RESTORE_PATH, contact_id, challenge_id, confirmation_id, idempotency_key
+        )
+
+    def _contact_lifecycle_post(
+        self,
+        path_template: str,
+        contact_id: str,
+        challenge_id: str,
+        confirmation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        """Shared body for the contact archive and restore transitions."""
+        return self._signed_json_post(
+            path_template.format(contact_id=contact_id),
             {
                 "challengeId": challenge_id,
                 "confirmationId": confirmation_id,
