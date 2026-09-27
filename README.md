@@ -49,13 +49,18 @@ this substrate, each mapping to its existing device endpoint on the tracker.
 ## Use on a PC
 
 ```
-eom-connect-provider enroll --label "Office desk"   # once; prompts for the office session token
+eom-connect-provider enroll --label "Office desk"   # once; opens the browser to authorize
 eom-connect-provider run                            # serve until Ctrl+C
 ```
 
-`enroll` reads the office session token from a hidden prompt (or standard input),
-uses it for the two enrollment calls, and stores only the device key. It refuses to
-enroll a PC that is already enrolled. `run` registers where the Automate host
+`enroll` opens the staff portal's `/connect-enroll` page, where a signed-in admin
+checks the key fingerprint against the one printed in the terminal and clicks
+Authorize. The browser and a one-shot `127.0.0.1` listener hand the challenge,
+signature, and device id back and forth by top-level navigation, so the staff session
+token never leaves the browser (the same browser-plus-loopback pattern the email
+watcher's Gmail and Microsoft sign-in use). `--paste-token` instead reads the token
+from a hidden prompt. Either way only the device key is stored, and a PC that is
+already enrolled is refused. `run` registers where the Automate host
 discovers providers: `%LOCALAPPDATA%\LocalConnect\runtime\v2\providers` on Windows,
 `$XDG_RUNTIME_DIR/local-connect/v2/providers` elsewhere. Both default to the live
 tracker; `--tracker-url` overrides it (https only, or http to a loopback tracker).
