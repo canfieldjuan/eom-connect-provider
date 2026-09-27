@@ -9,8 +9,11 @@ entitlement uses, so the two agree on placement:
 - Windows: ``%LOCALAPPDATA%\\LocalConnect``.
 - Unix: ``$XDG_CONFIG_HOME/local-connect`` or ``~/.config/local-connect``.
 
-The directory is created 0o700 and the record written 0o600 through a temp file
-and ``os.replace`` so a crash never leaves a torn or world-readable key.
+On Unix the directory is created 0o700 and the record written 0o600 through a temp
+file and ``os.replace`` so a crash never leaves a torn or world-readable key. On
+Windows mode bits do not protect anything, so the directory and record go through
+the host's owner-private DACL helpers (``connect_automate.connect_windows``), as the
+credential contract's Store section requires.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from .proof import b64u
 
 STORE_FILE_NAME = "eom-connect-device.json"
 _RECORD_VERSION = 1
+_MAX_RECORD_BYTES = 4096
 
 
 def default_store_dir() -> Path:
@@ -80,13 +84,27 @@ def save_credential(store_dir: Path, credential: DeviceCredential) -> Path:
     ``pending_rotation`` block the credential contract describes is a later
     slice; this writer keeps a single record.)
     """
-    _ensure_private_dir(store_dir)
     record = {
         "version": _RECORD_VERSION,
         "device_id": credential.device_id,
         "private_key_b64u": b64u(_private_key_raw(credential.private_key)),
     }
     path = store_dir / STORE_FILE_NAME
+    if os.name == "nt":
+        from connect_automate.connect_windows import (
+            atomic_replace_bytes,
+            ensure_private_directory,
+            local_app_data_root,
+        )
+
+        ensure_private_directory(store_dir, root=local_app_data_root())
+        atomic_replace_bytes(
+            path,
+            json.dumps(record, separators=(",", ":"), sort_keys=True).encode(),
+            _MAX_RECORD_BYTES,
+        )
+        return path
+    _ensure_private_dir(store_dir)
     temporary = path.with_name(f".{path.name}.{uuid4()}.tmp")
     try:
         with temporary.open("xb") as stream:
